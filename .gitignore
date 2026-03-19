@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment
+.env
+.env.local
+
+# TypeScript
+*.js.map
+*.d.ts
+!src/**/*.d.ts
+*.tsbuildinfo
+
+# Supabase
+supabase/.temp/
+supabase/.branches/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*

@@ -9,7 +9,9 @@
     "test": "tsx src/index.ts",
     "pc:search": "tsx src/scripts/search-pricecharting.ts",
     "pc:update": "tsx src/scripts/update-prices.ts",
-    "collection": "tsx src/scripts/collection.ts"
+    "collection": "tsx src/scripts/collection.ts",
+    "collection:import": "tsx src/scripts/import-collection.ts",
+    "csv:import": "tsx src/scripts/import-csv.ts"
   },
   "keywords": [],
   "author": "",

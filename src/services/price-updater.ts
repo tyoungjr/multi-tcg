@@ -1,6 +1,7 @@
 import { supabase } from "../lib/supabase";
 import {
   getProductById,
+  getProductByUpc,
   searchProducts,
   getPriceForCondition,
 } from "../lib/pricecharting";
@@ -36,7 +37,7 @@ export async function updateProductPrice(
       pcProduct = await getProductById(product.pricecharting_id);
     } else if (product.upc) {
       try {
-        pcProduct = await getProductById(product.upc);
+        pcProduct = await getProductByUpc(product.upc);
       } catch {
         // UPC not found, fall through
       }
@@ -120,10 +121,9 @@ export async function updateAllPrices(): Promise<PriceUpdateResult[]> {
 
 export async function linkProductToPriceCharting(
   productId: string,
-  query: string,
-  consoleName?: string
+  query: string
 ): Promise<PriceChartingProduct[]> {
-  return searchProducts(query, consoleName);
+  return searchProducts(query);
 }
 
 export async function confirmPriceChartingLink(

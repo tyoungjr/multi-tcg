@@ -31,6 +31,9 @@ desktop.ini
 *.swp
 *.swo
 
+# Collection data (may contain personal info)
+*.csv
+
 # Logs
 *.log
 npm-debug.log*

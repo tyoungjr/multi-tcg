@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
-    "test": "tsx src/index.ts"
+    "test": "tsx src/index.ts",
+    "pc:search": "tsx src/scripts/search-pricecharting.ts",
+    "pc:update": "tsx src/scripts/update-prices.ts",
+    "collection": "tsx src/scripts/collection.ts"
   },
   "keywords": [],
   "author": "",

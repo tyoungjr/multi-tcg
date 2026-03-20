@@ -6,6 +6,17 @@ export interface TradingCardMetadata {
   edition?: string;
   language?: string;
   foil?: boolean;
+  psa_grade?: number;
+  psa_cert_number?: string;
+  bgs_grade?: number;
+  bgs_subgrades?: {
+    centering?: number;
+    corners?: number;
+    edges?: number;
+    surface?: number;
+  };
+  cgc_grade?: number;
+  grading_label?: string;
 }
 
 export interface VideoGameMetadata {

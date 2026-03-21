@@ -11,14 +11,18 @@
     "pc:update": "tsx src/scripts/update-prices.ts",
     "collection": "tsx src/scripts/collection.ts",
     "collection:import": "tsx src/scripts/import-collection.ts",
-    "csv:import": "tsx src/scripts/import-csv.ts"
+    "csv:import": "tsx src/scripts/import-csv.ts",
+    "identify": "tsx src/scripts/identify.ts",
+    "identify:watch": "tsx src/scripts/identify-watch.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
     "@supabase/supabase-js": "^2.99.3",
-    "dotenv": "^17.3.1"
+    "dotenv": "^17.3.1",
+    "sharp": "^0.34.5"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

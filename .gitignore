@@ -34,6 +34,9 @@ desktop.ini
 # Collection data (may contain personal info)
 *.csv
 
+# Image inbox (file watcher)
+inbox/
+
 # Logs
 *.log
 npm-debug.log*

@@ -13,7 +13,10 @@
     "collection:import": "tsx src/scripts/import-collection.ts",
     "csv:import": "tsx src/scripts/import-csv.ts",
     "identify": "tsx src/scripts/identify.ts",
-    "identify:watch": "tsx src/scripts/identify-watch.ts"
+    "identify:watch": "tsx src/scripts/identify-watch.ts",
+    "shopify:auth": "tsx src/scripts/shopify-auth.ts",
+    "shopify:push": "tsx src/scripts/shopify-push.ts",
+    "shopify:orders": "tsx src/scripts/shopify-orders.ts"
   },
   "keywords": [],
   "author": "",

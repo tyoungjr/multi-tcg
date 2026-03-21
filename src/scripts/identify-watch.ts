@@ -1,24 +1,45 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import { watch, existsSync, mkdirSync, renameSync } from "fs";
+import { createInterface } from "readline";
+import { watch, existsSync, mkdirSync, renameSync, readdirSync, readFileSync } from "fs";
 import { join, extname, basename } from "path";
 import {
   visualSearchFromFile,
 } from "../services/visual-search";
 import type { SearchOptions } from "../services/visual-search";
-import type { VisualSearchResult } from "../types/visual-search";
+import type { VisualSearchResult, PriceChartingMatch } from "../types/visual-search";
+import type { ProductInsert, ProductCategory, ProductCondition } from "../types/database";
+import { supabase } from "../lib/supabase";
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif"]);
-const DEBOUNCE_MS = 2000; // wait for file to finish writing
+const DEBOUNCE_MS = 2000;
 
-// Track files we've already processed or are currently processing
 const processed = new Set<string>();
 const pending = new Map<string, NodeJS.Timeout>();
+const fileQueue: string[] = [];
+let processing = false;
+
+// ---------------------------------------------------------------------------
+// Readline prompt
+// ---------------------------------------------------------------------------
+
+const rl = createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+
+function ask(question: string): Promise<string> {
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      resolve(answer.trim());
+    });
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Display
@@ -27,6 +48,13 @@ const pending = new Map<string, NodeJS.Timeout>();
 function formatPrice(cents: number | undefined): string {
   if (!cents || cents === 0) return "-";
   return `$${(cents / 100).toFixed(2)}`;
+}
+
+function parseDollars(value: string): number {
+  const cleaned = value.replace("$", "").trim();
+  const num = parseFloat(cleaned);
+  if (isNaN(num)) throw new Error(`Invalid price: "${value}"`);
+  return Math.round(num * 100);
 }
 
 function printResult(filePath: string, result: VisualSearchResult): void {
@@ -55,31 +83,229 @@ function printResult(filePath: string, result: VisualSearchResult): void {
     console.log(`  Details:    ${details.join(" | ")}`);
   }
 
-  if (result.pricecharting) {
-    const pc = result.pricecharting;
-    console.log(`  PC Match:   ${pc.product_name} (${pc.console_name})`);
-    console.log(`  PC Price:   Loose ${formatPrice(pc.loose_price_cents)} | CIB ${formatPrice(pc.cib_price_cents)} | New ${formatPrice(pc.new_price_cents)}`);
-  }
-
-  if (result.ebay_prices && result.ebay_prices.sample_size > 0) {
-    console.log(`  eBay:       Median ${formatPrice(result.ebay_prices.median_price_cents)} (${result.ebay_prices.sample_size} sold)`);
-  }
-
-  if (result.google_lens_prices && result.google_lens_prices.sample_size > 0) {
-    console.log(`  Lens:       Median ${formatPrice(result.google_lens_prices.median_price_cents)} (${result.google_lens_prices.sample_size} results)`);
-  }
-
   if (result.suggested_market_price_cents) {
     console.log(`  >>> PRICE:  ${formatPrice(result.suggested_market_price_cents)} (${result.price_source})`);
   } else {
     console.log(`  >>> PRICE:  No pricing data found`);
   }
-
-  console.log("");
 }
 
 // ---------------------------------------------------------------------------
-// Process a single file
+// Interactive PriceCharting pick
+// ---------------------------------------------------------------------------
+
+async function pickPriceChartingMatch(
+  result: VisualSearchResult
+): Promise<PriceChartingMatch | null | "keep"> {
+  const candidates = result.pc_candidates;
+  if (!candidates || candidates.length === 0) {
+    if (result.pricecharting) return "keep";
+    return null;
+  }
+
+  console.log(`\n  PriceCharting candidates:`);
+  for (let i = 0; i < candidates.length; i++) {
+    const c = candidates[i];
+    const selected = result.pricecharting?.pricecharting_id === c.pricecharting_id ? " <<<" : "";
+    console.log(
+      `    [${i}] ${c.product_name} (${c.console_name}) - Loose: ${formatPrice(c.loose_price_cents)}${selected}`
+    );
+  }
+
+  const answer = await ask(`  Pick match [0-${candidates.length - 1}], Enter to keep auto, 'n' for none: `);
+
+  if (answer === "" || answer === "y") {
+    return "keep";
+  }
+  if (answer === "n" || answer === "none") {
+    return null;
+  }
+
+  const idx = parseInt(answer, 10);
+  if (!isNaN(idx) && idx >= 0 && idx < candidates.length) {
+    return candidates[idx];
+  }
+
+  console.log("  Invalid choice, keeping auto-match.");
+  return "keep";
+}
+
+// ---------------------------------------------------------------------------
+// Interactive save prompt
+// ---------------------------------------------------------------------------
+
+async function uploadImage(
+  filePath: string,
+  productId: string
+): Promise<{ storagePath: string; publicUrl: string } | null> {
+  try {
+    const file = basename(filePath);
+    const ext = extname(filePath).toLowerCase();
+    const contentType =
+      ext === ".png" ? "image/png" :
+      ext === ".webp" ? "image/webp" :
+      ext === ".gif" ? "image/gif" :
+      "image/jpeg";
+
+    const storagePath = `products/${productId}/${file}`;
+    const fileData = readFileSync(filePath);
+
+    const { error } = await supabase.storage
+      .from("product-images")
+      .upload(storagePath, fileData, { contentType, upsert: true });
+
+    if (error) {
+      console.warn(`  Image upload failed: ${error.message}`);
+      return null;
+    }
+
+    const { data: urlData } = supabase.storage
+      .from("product-images")
+      .getPublicUrl(storagePath);
+
+    return { storagePath, publicUrl: urlData.publicUrl };
+  } catch (err) {
+    console.warn(`  Image upload failed: ${err instanceof Error ? err.message : err}`);
+    return null;
+  }
+}
+
+async function promptSave(
+  result: VisualSearchResult,
+  pcMatch: PriceChartingMatch | null | undefined,
+  imageFilePath: string
+): Promise<void> {
+  const answer = await ask("\n  Save to database? (y/n/edit): ");
+
+  if (answer === "n" || answer === "no") {
+    console.log("  Skipped.");
+    return;
+  }
+
+  const { identification: id } = result;
+
+  // Defaults from identification
+  const conditionMap: Record<string, ProductCondition> = {
+    mint: "new_sealed",
+    "near mint": "cib",
+    "lightly played": "good",
+    "moderately played": "good",
+    "heavily played": "loose",
+    damaged: "loose",
+  };
+
+  let title = id.title;
+  let category: ProductCategory = (id.category as ProductCategory) || "misc";
+  let condition: ProductCondition =
+    id.details.condition_estimate
+      ? conditionMap[id.details.condition_estimate.toLowerCase()] ?? "loose"
+      : "loose";
+  let status: string = "in_stock";
+  let askingPrice: number | undefined;
+  let notes: string | undefined;
+  let qty = 1;
+
+  if (answer === "edit" || answer === "e") {
+    // Interactive edit mode
+    const newTitle = await ask(`  Title [${title}]: `);
+    if (newTitle) title = newTitle;
+
+    const newCat = await ask(`  Category [${category}]: `);
+    if (newCat) category = newCat as ProductCategory;
+
+    const newCond = await ask(`  Condition (loose/good/very_good/cib/new_sealed/graded) [${condition}]: `);
+    if (newCond) condition = newCond as ProductCondition;
+
+    const newStatus = await ask(`  Status (in_stock/personal_collection/listed_ebay) [${status}]: `);
+    if (newStatus) status = newStatus;
+
+    const priceStr = await ask(`  Asking price in $ (blank to skip): `);
+    if (priceStr) askingPrice = parseDollars(priceStr);
+
+    const qtyStr = await ask(`  Quantity [1]: `);
+    if (qtyStr) qty = parseInt(qtyStr, 10) || 1;
+
+    const notesStr = await ask(`  Notes (blank to skip): `);
+    if (notesStr) notes = notesStr;
+  }
+
+  // Build metadata
+  const metadata: Record<string, unknown> = { ...id.details };
+  delete metadata.condition_estimate;
+  delete metadata.grading_company;
+  delete metadata.grade;
+
+  const insert: ProductInsert = {
+    title,
+    category,
+    description: id.description,
+    condition,
+    inventory_status: status as ProductInsert["inventory_status"],
+    metadata,
+    quantity: qty,
+  };
+
+  if (id.details.grading_company) {
+    insert.grading_company = id.details.grading_company;
+  }
+  if (id.details.grade) {
+    insert.graded_score = id.details.grade;
+    insert.condition = "graded";
+  }
+
+  if (pcMatch) {
+    insert.pricecharting_id = pcMatch.pricecharting_id;
+    // Use the selected match's price
+    const pcPrice = pcMatch.loose_price_cents || pcMatch.cib_price_cents || pcMatch.new_price_cents;
+    if (pcPrice > 0) insert.market_price = pcPrice;
+  } else if (result.suggested_market_price_cents) {
+    insert.market_price = result.suggested_market_price_cents;
+  }
+
+  if (askingPrice) insert.current_price = askingPrice;
+  if (notes) insert.purchase_notes = notes;
+
+  const { data, error } = await supabase
+    .from("products")
+    .insert(insert)
+    .select("id, title, category, condition, inventory_status, current_price, market_price, pricecharting_id")
+    .single();
+
+  if (error) {
+    console.error(`  Save failed: ${error.message}`);
+    return;
+  }
+
+  console.log(`\n  SAVED`);
+  console.log(`  ID:       ${data.id}`);
+  console.log(`  Title:    ${data.title}`);
+  console.log(`  Category: ${data.category} | Condition: ${data.condition} | Status: ${data.inventory_status}`);
+  console.log(`  Asking:   ${formatPrice(data.current_price)} | Market: ${formatPrice(data.market_price)}`);
+  if (data.pricecharting_id) {
+    console.log(`  PC ID:    ${data.pricecharting_id}`);
+  }
+
+  // Upload image to Supabase Storage and create image record
+  const uploaded = await uploadImage(imageFilePath, data.id);
+  await supabase.from("product_images").insert({
+    product_id: data.id,
+    storage_path: uploaded?.storagePath ?? null,
+    url: uploaded?.publicUrl ?? null,
+    is_primary: true,
+    visual_search_result: {
+      identification: result.identification,
+      pricecharting: pcMatch,
+      price_source: result.price_source,
+    },
+  });
+
+  if (uploaded) {
+    console.log(`  Image:    ${uploaded.publicUrl}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Process a single file (interactive)
 // ---------------------------------------------------------------------------
 
 async function processFile(
@@ -90,24 +316,41 @@ async function processFile(
   processed.add(filePath);
 
   const file = basename(filePath);
-  console.log(`\nProcessing: ${file}...`);
+  console.log(`\n${"~".repeat(60)}`);
+  console.log(`Processing: ${file}...`);
 
   try {
     const result = await visualSearchFromFile(filePath, options);
     printResult(filePath, result);
 
-    // Move to processed/ subfolder
+    // Step 1: Let user pick PriceCharting match
+    let pcMatch = result.pricecharting;
+    if (result.pc_candidates && result.pc_candidates.length > 1) {
+      const pick = await pickPriceChartingMatch(result);
+      if (pick === "keep") {
+        // keep auto-match
+      } else if (pick === null) {
+        pcMatch = undefined;
+        console.log("  No PriceCharting link.");
+      } else {
+        pcMatch = pick;
+        console.log(`  Selected: ${pick.product_name} (${pick.console_name}) - ${formatPrice(pick.loose_price_cents)}`);
+      }
+    }
+
+    // Step 2: Save prompt
+    await promptSave(result, pcMatch, filePath);
+
+    // Move to processed/
     const dir = join(filePath, "..");
     const processedDir = join(dir, "processed");
     if (!existsSync(processedDir)) {
       mkdirSync(processedDir, { recursive: true });
     }
-    const dest = join(processedDir, file);
     try {
-      renameSync(filePath, dest);
-      console.log(`  Moved to: processed/${file}`);
+      renameSync(filePath, join(processedDir, file));
     } catch {
-      // File might be locked, that's ok
+      // File might be locked
     }
   } catch (err) {
     console.error(`  Failed: ${err instanceof Error ? err.message : err}`);
@@ -115,29 +358,48 @@ async function processFile(
 }
 
 // ---------------------------------------------------------------------------
+// Queue processor (sequential so prompts don't overlap)
+// ---------------------------------------------------------------------------
+
+async function processQueue(options: SearchOptions): Promise<void> {
+  if (processing) return;
+  processing = true;
+
+  while (fileQueue.length > 0) {
+    const filePath = fileQueue.shift()!;
+    if (!processed.has(filePath) && existsSync(filePath)) {
+      await processFile(filePath, options);
+    }
+  }
+
+  processing = false;
+  console.log(`\nWaiting for images... (Ctrl+C to stop)`);
+}
+
+// ---------------------------------------------------------------------------
 // Watcher
 // ---------------------------------------------------------------------------
 
-function startWatching(
-  inboxDir: string,
-  options: SearchOptions
-): void {
+function startWatching(inboxDir: string, options: SearchOptions): void {
   console.log(`Watching: ${inboxDir}`);
   console.log(`Drop images here to identify and price them.`);
   console.log(`Processed files move to: ${inboxDir}/processed/`);
   console.log(`Press Ctrl+C to stop.\n`);
 
-  // Process any files already in the directory
-  const { readdirSync } = require("fs") as typeof import("fs");
+  // Queue existing files
   const existing = readdirSync(inboxDir);
   for (const file of existing) {
     const ext = extname(file).toLowerCase();
     if (IMAGE_EXTENSIONS.has(ext) && file !== "processed") {
-      const filePath = join(inboxDir, file);
-      // Small delay to stagger existing files
-      const timeout = setTimeout(() => processFile(filePath, options), 500);
-      pending.set(filePath, timeout);
+      fileQueue.push(join(inboxDir, file));
     }
+  }
+
+  if (fileQueue.length > 0) {
+    console.log(`Found ${fileQueue.length} existing image(s).\n`);
+    processQueue(options);
+  } else {
+    console.log(`Waiting for images... (Ctrl+C to stop)`);
   }
 
   // Watch for new files
@@ -149,7 +411,7 @@ function startWatching(
 
     const filePath = join(inboxDir, filename);
 
-    // Debounce: wait for file to finish writing (phone transfers can be slow)
+    // Debounce for slow transfers
     if (pending.has(filePath)) {
       clearTimeout(pending.get(filePath)!);
     }
@@ -159,7 +421,8 @@ function startWatching(
       setTimeout(() => {
         pending.delete(filePath);
         if (existsSync(filePath) && !processed.has(filePath)) {
-          processFile(filePath, options);
+          fileQueue.push(filePath);
+          processQueue(options);
         }
       }, DEBOUNCE_MS)
     );
@@ -171,7 +434,7 @@ function startWatching(
 // ---------------------------------------------------------------------------
 
 function printUsage(): void {
-  console.log("Watch a folder for images and auto-identify + price them\n");
+  console.log("Watch a folder for images, identify, and interactively save\n");
   console.log("Usage:");
   console.log("  npm run identify:watch -- inbox/              Watch the inbox/ folder");
   console.log("  npm run identify:watch -- inbox/ --skip-pc    Skip PriceCharting");

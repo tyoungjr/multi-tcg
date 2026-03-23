@@ -2,15 +2,16 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import { createInterface } from "readline";
-import { watch, existsSync, mkdirSync, renameSync, readdirSync, readFileSync } from "fs";
+import { watch, existsSync, mkdirSync, renameSync, readdirSync, readFileSync, statSync } from "fs";
 import { join, extname, basename } from "path";
 import {
   visualSearchFromFile,
 } from "../services/visual-search";
 import type { SearchOptions } from "../services/visual-search";
 import type { VisualSearchResult, PriceChartingMatch } from "../types/visual-search";
-import type { ProductInsert, ProductCategory, ProductCondition } from "../types/database";
+import type { Product, ProductInsert, ProductCategory, ProductCondition } from "../types/database";
 import { supabase } from "../lib/supabase";
+import { pushProductToShopify } from "../services/shopify-sync";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -18,6 +19,19 @@ import { supabase } from "../lib/supabase";
 
 const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif"]);
 const DEBOUNCE_MS = 2000;
+const STABILITY_CHECK_MS = 1500; // wait for file size to stop changing (OneDrive sync)
+const STABILITY_RETRIES = 5;    // max checks before giving up
+
+// OneDrive temp file patterns to ignore
+const IGNORE_PATTERNS = [
+  /^~\$/,           // Office temp files
+  /^~tmp/i,         // temp files
+  /\.tmp$/i,        // .tmp extension
+  /\.partial$/i,    // partial downloads
+  /\.crdownload$/i, // Chrome downloads
+  /\(1\)\./,        // duplicate files from sync conflicts
+  /^\.~/,           // hidden temp
+];
 
 const processed = new Set<string>();
 const pending = new Map<string, NodeJS.Timeout>();
@@ -301,6 +315,51 @@ async function promptSave(
 
   if (uploaded) {
     console.log(`  Image:    ${uploaded.publicUrl}`);
+  }
+
+  // Step 3: Offer to push to Shopify immediately
+  if (process.env.SHOPIFY_ACCESS_TOKEN) {
+    const listAnswer = await ask("  List on Shopify now? (y/n): ");
+    if (listAnswer === "y" || listAnswer === "yes") {
+      // Ensure there's a listing price
+      let listingPrice = data.current_price ?? data.market_price;
+      if (!listingPrice || listingPrice <= 0) {
+        const priceInput = await ask("  Listing price in $ (required): ");
+        if (!priceInput) {
+          console.log("  No price set, skipping Shopify.");
+          return;
+        }
+        listingPrice = parseDollars(priceInput);
+      } else {
+        const priceOverride = await ask(`  Listing price [${formatPrice(listingPrice)}]: `);
+        if (priceOverride) {
+          listingPrice = parseDollars(priceOverride);
+        }
+      }
+
+      // Update the price in the database
+      await supabase
+        .from("products")
+        .update({ current_price: listingPrice })
+        .eq("id", data.id);
+
+      console.log(`  Listing at ${formatPrice(listingPrice)}...`);
+
+      const { data: fullProduct } = await supabase
+        .from("products")
+        .select("*")
+        .eq("id", data.id)
+        .single();
+
+      if (fullProduct) {
+        const pushResult = await pushProductToShopify(fullProduct as Product);
+        if (pushResult.success) {
+          console.log(`  LISTED on Shopify (${pushResult.action}) - Product ID: ${pushResult.shopifyProductId}`);
+        } else {
+          console.error(`  Shopify push failed: ${pushResult.error}`);
+        }
+      }
+    }
   }
 }
 

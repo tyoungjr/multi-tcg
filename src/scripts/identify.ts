@@ -8,8 +8,9 @@ import {
 } from "../services/visual-search";
 import type { SearchOptions } from "../services/visual-search";
 import type { VisualSearchResult } from "../types/visual-search";
-import type { ProductInsert, ProductCategory, ProductCondition, InventoryStatus } from "../types/database";
+import type { Product, ProductInsert, ProductCategory, ProductCondition, InventoryStatus } from "../types/database";
 import { supabase } from "../lib/supabase";
+import { pushProductToShopify } from "../services/shopify-sync";
 
 function formatPrice(cents: number | undefined): string {
   if (!cents || cents === 0) return "-";
@@ -288,6 +289,31 @@ async function saveToDatabase(
       },
     });
   }
+
+  // Push to Shopify if --list flag is present
+  if (args.includes("--list")) {
+    const price = data.current_price ?? data.market_price;
+    if (!price || price <= 0) {
+      console.log("\n  Skipping Shopify listing - no price set. Use --price to set one.");
+      return;
+    }
+
+    console.log("\n  Pushing to Shopify...");
+    const { data: fullProduct } = await supabase
+      .from("products")
+      .select("*")
+      .eq("id", data.id)
+      .single();
+
+    if (fullProduct) {
+      const pushResult = await pushProductToShopify(fullProduct as Product);
+      if (pushResult.success) {
+        console.log(`  LISTED on Shopify (${pushResult.action}) - Product ID: ${pushResult.shopifyProductId}`);
+      } else {
+        console.error(`  Shopify push failed: ${pushResult.error}`);
+      }
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -313,6 +339,10 @@ function printUsage(): void {
   console.log("  npm run identify -- photo.jpg --save --condition loose --price 12.99");
   console.log("  npm run identify -- photo.jpg --save --status personal_collection");
   console.log("  npm run identify -- photo.jpg --save --notes \"display box only, no cards\"");
+  console.log("");
+  console.log("Save + list on Shopify (one shot):");
+  console.log("  npm run identify -- photo.jpg --save --list --price 29.99");
+  console.log("  npm run identify -- photo.jpg --save --list --price 49.99 --condition cib");
   console.log("");
   console.log("Save overrides:");
   console.log("  --title      Override identified title");

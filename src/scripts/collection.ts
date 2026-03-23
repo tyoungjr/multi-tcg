@@ -43,6 +43,28 @@ function printProduct(p: Product): void {
 }
 
 async function searchCollection(query: string): Promise<void> {
+  // Try fuzzy search first (requires pg_trgm migration 00007)
+  const { data: fuzzyData, error: fuzzyError } = await supabase
+    .rpc("search_products_fuzzy", {
+      search_query: query,
+      similarity_threshold: 0.15,
+      max_results: 20,
+    });
+
+  if (!fuzzyError && fuzzyData && fuzzyData.length > 0) {
+    console.log(`Found ${fuzzyData.length} product(s) matching "${query}" (fuzzy):\n`);
+    for (const row of fuzzyData) {
+      const score = ((row.similarity_score as number) * 100).toFixed(0);
+      const price = row.current_price ?? row.market_price;
+      console.log(
+        `  [${score}%] ${row.title} (${row.category}) - ${price ? `$${(price / 100).toFixed(2)}` : "no price"}`
+      );
+      console.log(`         ID: ${row.id}`);
+    }
+    return;
+  }
+
+  // Fallback to ILIKE if fuzzy function not available
   const { data, error } = await supabase
     .from("products")
     .select("*")

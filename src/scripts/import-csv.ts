@@ -234,6 +234,15 @@ async function importCsv(filePath: string, dryRun: boolean): Promise<void> {
         ? extractCardMetadata(row.consoleName, row.productName, row.folder)
         : { console_name: row.consoleName, folder: row.folder || undefined };
 
+    // Build PriceCharting URL from product name + console name
+    // Format: https://www.pricecharting.com/game/{console-slug}/{product-slug}
+    const pcUrl = row.id
+      ? `https://www.pricecharting.com/offers?product=${row.id}`
+      : undefined;
+    if (pcUrl) {
+      metadata.pricecharting_url = pcUrl;
+    }
+
     const insert: ProductInsert = {
       title: row.productName,
       category,

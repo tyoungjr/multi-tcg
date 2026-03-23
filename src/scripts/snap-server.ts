@@ -196,20 +196,28 @@ async function saveAndList(req: SaveRequest): Promise<{
       .from("product-images")
       .upload(storagePath, fileData, { contentType, upsert: true });
 
-    if (!uploadError) {
+    if (uploadError) {
+      console.warn(`  Image upload failed: ${uploadError.message}`);
+    } else {
       const { data: urlData } = supabase.storage
         .from("product-images")
         .getPublicUrl(storagePath);
 
-      await supabase.from("product_images").insert({
+      console.log(`  Image uploaded: ${urlData.publicUrl}`);
+
+      const { error: imgRecordError } = await supabase.from("product_images").insert({
         product_id: product.id,
         storage_path: storagePath,
         url: urlData.publicUrl,
         is_primary: true,
       });
+
+      if (imgRecordError) {
+        console.warn(`  Image record insert failed: ${imgRecordError.message}`);
+      }
     }
-  } catch {
-    // Non-critical
+  } catch (err) {
+    console.warn(`  Image processing error: ${err instanceof Error ? err.message : err}`);
   }
 
   const result: { product_id: string; shopify_product_id?: string; shopify_url?: string; error?: string } = {
@@ -362,9 +370,10 @@ function getCameraPage(): string {
   </style>
 </head>
 <body>
-  <div class="header">
+  <div class="header" style="display:flex;gap:12px;align-items:center;">
     <div class="status-dot"></div>
-    <h1>Snap & Sell</h1>
+    <h1 style="flex:1">Snap & Sell</h1>
+    <a href="/inventory" style="color:#60a5fa;font-size:13px;text-decoration:none;padding:6px 12px;background:#222;border-radius:4px;">Inventory</a>
   </div>
 
   <!-- Screen 1: Capture -->
@@ -662,6 +671,344 @@ function getCameraPage(): string {
 }
 
 // ---------------------------------------------------------------------------
+// Inventory browse page
+// ---------------------------------------------------------------------------
+
+function getInventoryPage(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Inventory - Snap & Sell</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, system-ui, sans-serif;
+      background: #111; color: #eee;
+      min-height: 100dvh;
+    }
+    .header {
+      padding: 12px 16px;
+      background: #1a1a1a;
+      border-bottom: 1px solid #333;
+      position: sticky; top: 0; z-index: 10;
+    }
+    .header h1 { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+    .header-nav { display: flex; gap: 8px; margin-bottom: 8px; }
+    .header-nav a {
+      color: #60a5fa; text-decoration: none; font-size: 13px;
+      padding: 4px 8px; background: #222; border-radius: 4px;
+    }
+    .header-nav a.active { background: #2563eb; color: white; }
+    .search-row { display: flex; gap: 8px; }
+    .search-row input {
+      flex: 1; padding: 10px; font-size: 16px;
+      background: #222; border: 1px solid #444; border-radius: 6px;
+      color: #eee; outline: none;
+    }
+    .search-row input:focus { border-color: #2563eb; }
+    .search-row select {
+      padding: 10px; font-size: 14px;
+      background: #222; border: 1px solid #444; border-radius: 6px;
+      color: #eee;
+    }
+    .filter-row {
+      display: flex; gap: 8px; margin-top: 8px; align-items: center;
+    }
+    .filter-row label { font-size: 13px; color: #aaa; display: flex; align-items: center; gap: 4px; }
+    .filter-row input[type="checkbox"] { width: 18px; height: 18px; }
+
+    .list { padding: 8px; }
+    .item {
+      display: flex; gap: 12px; padding: 12px;
+      background: #1a1a1a; border: 1px solid #333;
+      border-radius: 8px; margin-bottom: 8px;
+      cursor: pointer; transition: border-color 0.15s;
+    }
+    .item:active { border-color: #2563eb; }
+    .item.has-photo { border-left: 3px solid #4ade80; }
+    .item-thumb {
+      width: 60px; height: 60px; border-radius: 6px;
+      background: #333; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 24px; color: #666; overflow: hidden;
+    }
+    .item-thumb img { width: 100%; height: 100%; object-fit: cover; }
+    .item-info { flex: 1; min-width: 0; }
+    .item-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .item-meta { font-size: 12px; color: #888; margin-top: 2px; }
+    .item-price { font-size: 14px; color: #4ade80; font-weight: 600; margin-top: 4px; }
+    .item-nophoto { font-size: 11px; color: #f59e0b; margin-top: 2px; }
+
+    .loading { text-align: center; padding: 40px; color: #888; }
+    .load-more {
+      display: block; width: 100%; padding: 14px;
+      background: #222; border: 1px solid #444; border-radius: 8px;
+      color: #eee; font-size: 14px; cursor: pointer; margin: 8px;
+    }
+
+    /* Photo modal */
+    .modal-overlay {
+      display: none; position: fixed; inset: 0;
+      background: rgba(0,0,0,0.85); z-index: 20;
+      flex-direction: column; align-items: center; justify-content: center;
+      padding: 20px;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal-card {
+      background: #1a1a1a; border-radius: 12px;
+      padding: 20px; width: 100%; max-width: 400px;
+    }
+    .modal-card h2 { font-size: 16px; margin-bottom: 4px; }
+    .modal-card .detail { font-size: 13px; color: #aaa; margin-bottom: 12px; }
+    .modal-card .snap-btn {
+      width: 100%; padding: 16px; border: none; border-radius: 8px;
+      background: #2563eb; color: white; font-size: 16px;
+      font-weight: 600; cursor: pointer;
+    }
+    .modal-card .snap-btn:active { background: #1d4ed8; }
+    .modal-card .cancel-btn {
+      width: 100%; padding: 12px; border: none; border-radius: 8px;
+      background: #333; color: #eee; font-size: 14px;
+      cursor: pointer; margin-top: 8px;
+    }
+    .modal-card .success {
+      background: #16a34a; color: white; padding: 12px;
+      border-radius: 8px; text-align: center; font-weight: 600;
+      margin-top: 12px;
+    }
+    .modal-preview {
+      width: 100%; max-height: 200px; object-fit: contain;
+      border-radius: 8px; background: #000; margin-bottom: 12px;
+    }
+    input.modal-file { display: none; }
+    .count-bar {
+      padding: 8px 16px; font-size: 12px; color: #888;
+      display: flex; justify-content: space-between;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-nav">
+      <a href="/">Snap New</a>
+      <a href="/inventory" class="active">Inventory</a>
+    </div>
+    <h1>Inventory</h1>
+    <div class="search-row">
+      <input type="text" id="search" placeholder="Search items...">
+      <select id="category-filter">
+        <option value="">All</option>
+        <option value="trading_card">Cards</option>
+        <option value="video_game">Games</option>
+        <option value="console_hardware">Consoles</option>
+        <option value="accessory">Accessories</option>
+        <option value="coin">Coins</option>
+        <option value="comic">Comics</option>
+        <option value="toy">Toys</option>
+        <option value="misc">Misc</option>
+      </select>
+    </div>
+    <div class="filter-row">
+      <label><input type="checkbox" id="no-photo-filter"> Needs photo</label>
+    </div>
+  </div>
+
+  <div class="count-bar">
+    <span id="count-text">Loading...</span>
+    <span id="photo-count"></span>
+  </div>
+
+  <div class="list" id="item-list"></div>
+  <button class="load-more" id="load-more" style="display:none">Load more</button>
+  <div class="loading" id="loading">Loading...</div>
+
+  <!-- Photo attach modal -->
+  <div class="modal-overlay" id="modal">
+    <div class="modal-card">
+      <h2 id="modal-title"></h2>
+      <div class="detail" id="modal-detail"></div>
+      <img class="modal-preview" id="modal-preview" style="display:none">
+      <button class="snap-btn" id="modal-snap">Take Photo</button>
+      <input type="file" class="modal-file" id="modal-file" accept="image/*" capture="environment">
+      <div id="modal-success" style="display:none"></div>
+      <button class="cancel-btn" id="modal-cancel">Cancel</button>
+    </div>
+  </div>
+
+  <script>
+    let currentPage = 1;
+    let allProducts = [];
+    let searchTimeout = null;
+    let selectedProductId = null;
+    // Track which products have photos (loaded per page)
+    const photoStatus = {};
+
+    const list = document.getElementById('item-list');
+    const loading = document.getElementById('loading');
+    const loadMore = document.getElementById('load-more');
+    const countText = document.getElementById('count-text');
+
+    async function loadProducts(page, append) {
+      if (!append) {
+        list.innerHTML = '';
+        loading.style.display = '';
+      }
+
+      const q = document.getElementById('search').value;
+      const cat = document.getElementById('category-filter').value;
+      const noPhoto = document.getElementById('no-photo-filter').checked ? '1' : '0';
+
+      const params = new URLSearchParams({ page: String(page), q, category: cat, no_photo: noPhoto });
+      const resp = await fetch('/api/inventory?' + params);
+      const data = await resp.json();
+
+      loading.style.display = 'none';
+
+      if (!append) allProducts = [];
+      allProducts = allProducts.concat(data.products);
+
+      // Check which products have images
+      if (data.products.length > 0) {
+        const ids = data.products.map(p => p.id);
+        const imgResp = await fetch('/api/product-images?ids=' + ids.join(','));
+        const imgData = await imgResp.json();
+        for (const [id, urls] of Object.entries(imgData)) {
+          photoStatus[id] = urls;
+        }
+      }
+
+      for (const p of data.products) {
+        const hasPhoto = photoStatus[p.id] && photoStatus[p.id].length > 0;
+        const imgUrl = hasPhoto ? photoStatus[p.id][0] : null;
+        const price = p.current_price || p.market_price;
+
+        const item = document.createElement('div');
+        item.className = 'item' + (hasPhoto ? ' has-photo' : '');
+        item.innerHTML =
+          '<div class="item-thumb">' +
+            (imgUrl ? '<img src="' + imgUrl + '">' : '?') +
+          '</div>' +
+          '<div class="item-info">' +
+            '<div class="item-title">' + escHtml(p.title) + '</div>' +
+            '<div class="item-meta">' + p.category.replace('_', ' ') + (p.condition ? ' | ' + p.condition.replace('_', ' ') : '') + '</div>' +
+            (price ? '<div class="item-price">$' + (price / 100).toFixed(2) + '</div>' : '') +
+            (!hasPhoto ? '<div class="item-nophoto">No photo</div>' : '') +
+          '</div>';
+
+        item.onclick = () => openModal(p, imgUrl);
+        list.appendChild(item);
+      }
+
+      const shown = allProducts.length;
+      const total = data.total ?? shown;
+      countText.textContent = shown + ' of ' + total + ' items';
+
+      loadMore.style.display = shown < total ? '' : 'none';
+    }
+
+    function escHtml(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // Search debounce
+    document.getElementById('search').oninput = () => {
+      clearTimeout(searchTimeout);
+      searchTimeout = setTimeout(() => { currentPage = 1; loadProducts(1, false); }, 300);
+    };
+    document.getElementById('category-filter').onchange = () => { currentPage = 1; loadProducts(1, false); };
+    document.getElementById('no-photo-filter').onchange = () => { currentPage = 1; loadProducts(1, false); };
+    loadMore.onclick = () => { currentPage++; loadProducts(currentPage, true); };
+
+    // Modal
+    function openModal(product, existingImg) {
+      selectedProductId = product.id;
+      document.getElementById('modal-title').textContent = product.title;
+      const price = product.current_price || product.market_price;
+      document.getElementById('modal-detail').textContent =
+        product.category.replace('_', ' ') +
+        (price ? ' | $' + (price / 100).toFixed(2) : '');
+
+      const preview = document.getElementById('modal-preview');
+      if (existingImg) {
+        preview.src = existingImg;
+        preview.style.display = '';
+      } else {
+        preview.style.display = 'none';
+      }
+
+      document.getElementById('modal-success').style.display = 'none';
+      document.getElementById('modal-snap').textContent = existingImg ? 'Replace Photo' : 'Take Photo';
+      document.getElementById('modal').classList.add('active');
+    }
+
+    document.getElementById('modal-cancel').onclick = () => {
+      document.getElementById('modal').classList.remove('active');
+    };
+
+    document.getElementById('modal-snap').onclick = () => {
+      document.getElementById('modal-file').click();
+    };
+
+    document.getElementById('modal-file').onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file || !selectedProductId) return;
+
+      document.getElementById('modal-snap').textContent = 'Uploading...';
+      document.getElementById('modal-snap').disabled = true;
+
+      const formData = new FormData();
+      formData.append('photo', file);
+
+      try {
+        const resp = await fetch('/api/attach-photo?product_id=' + selectedProductId, {
+          method: 'POST',
+          body: formData,
+        });
+        const result = await resp.json();
+
+        if (result.error) {
+          alert('Failed: ' + result.error);
+        } else {
+          // Show success
+          const preview = document.getElementById('modal-preview');
+          preview.src = result.image_url;
+          preview.style.display = '';
+
+          document.getElementById('modal-success').innerHTML =
+            '<div class="success">Photo attached!</div>';
+          document.getElementById('modal-success').style.display = '';
+
+          // Update photo status
+          photoStatus[selectedProductId] = [result.image_url];
+
+          // Close after delay
+          setTimeout(() => {
+            document.getElementById('modal').classList.remove('active');
+            // Refresh list to show updated photo
+            currentPage = 1;
+            loadProducts(1, false);
+          }, 1500);
+        }
+      } catch (err) {
+        alert('Error: ' + err.message);
+      } finally {
+        document.getElementById('modal-snap').textContent = 'Take Photo';
+        document.getElementById('modal-snap').disabled = false;
+        e.target.value = '';
+      }
+    };
+
+    // Initial load
+    loadProducts(1, false);
+  </script>
+</body>
+</html>`;
+}
+
+// ---------------------------------------------------------------------------
 // HTTP Server
 // ---------------------------------------------------------------------------
 
@@ -778,6 +1125,189 @@ async function handleRequest(
     } catch {
       res.writeHead(500);
       res.end("Error");
+    }
+    return;
+  }
+
+  // API: get image URLs for a batch of product IDs
+  if (url.startsWith("/api/product-images") && req.method === "GET") {
+    try {
+      const params = new URL(url, `http://localhost:${PORT}`).searchParams;
+      const ids = (params.get("ids") ?? "").split(",").filter(Boolean);
+
+      if (ids.length === 0) {
+        sendJson(res, 200, {});
+        return;
+      }
+
+      const { data: images } = await supabase
+        .from("product_images")
+        .select("product_id, url")
+        .in("product_id", ids)
+        .order("is_primary", { ascending: false });
+
+      const result: Record<string, string[]> = {};
+      for (const img of images ?? []) {
+        if (img.url) {
+          if (!result[img.product_id]) result[img.product_id] = [];
+          result[img.product_id].push(img.url);
+        }
+      }
+
+      sendJson(res, 200, result);
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });
+    }
+    return;
+  }
+
+  // Inventory browse page
+  if (url === "/inventory" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(getInventoryPage());
+    return;
+  }
+
+  // API: list inventory (with optional search, filter by no-photo)
+  if (url.startsWith("/api/inventory") && req.method === "GET") {
+    try {
+      const params = new URL(url, `http://localhost:${PORT}`).searchParams;
+      const search = params.get("q") ?? "";
+      const noPhoto = params.get("no_photo") === "1";
+      const category = params.get("category") ?? "";
+      const page = parseInt(params.get("page") ?? "1", 10);
+      const limit = 30;
+      const offset = (page - 1) * limit;
+
+      let query = supabase
+        .from("products")
+        .select("id, title, category, condition, inventory_status, current_price, market_price, quantity, metadata, pricecharting_id", { count: "exact" });
+
+      if (search) {
+        query = query.ilike("title", `%${search}%`);
+      }
+      if (category) {
+        query = query.eq("category", category);
+      }
+
+      query = query.order("title").range(offset, offset + limit - 1);
+
+      const { data: products, count, error } = await query;
+
+      if (error) {
+        sendJson(res, 500, { error: error.message });
+        return;
+      }
+
+      // If filtering for no-photo, check which products have images
+      let filtered = products ?? [];
+      if (noPhoto && filtered.length > 0) {
+        const ids = filtered.map((p: { id: string }) => p.id);
+        const { data: images } = await supabase
+          .from("product_images")
+          .select("product_id")
+          .in("product_id", ids);
+
+        const hasImage = new Set((images ?? []).map((i: { product_id: string }) => i.product_id));
+        filtered = filtered.filter((p: { id: string }) => !hasImage.has(p.id));
+      }
+
+      sendJson(res, 200, { products: filtered, total: count, page, limit });
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });
+    }
+    return;
+  }
+
+  // API: attach photo to existing product
+  if (url === "/api/attach-photo" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      const contentType = req.headers["content-type"] ?? "";
+      const file = parseMultipart(body, contentType);
+
+      if (!file || file.data.length === 0) {
+        sendJson(res, 400, { error: "No image received" });
+        return;
+      }
+
+      // Product ID is in the filename convention: {productId}_photo.jpg
+      // Or passed as a query param
+      const urlObj = new URL(req.url ?? "/", `http://localhost:${PORT}`);
+      const productId = urlObj.searchParams.get("product_id");
+
+      if (!productId) {
+        sendJson(res, 400, { error: "product_id query param required" });
+        return;
+      }
+
+      // Verify product exists
+      const { data: product } = await supabase
+        .from("products")
+        .select("id, title")
+        .eq("id", productId)
+        .single();
+
+      if (!product) {
+        sendJson(res, 404, { error: "Product not found" });
+        return;
+      }
+
+      // Save file locally
+      if (!existsSync(INBOX_DIR)) {
+        mkdirSync(INBOX_DIR, { recursive: true });
+      }
+      const safeName = file.filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const filePath = join(INBOX_DIR, `${Date.now()}-${safeName}`);
+      writeFileSync(filePath, file.data);
+
+      // Upload to Supabase Storage
+      const ext = extname(filePath).toLowerCase();
+      const ct =
+        ext === ".png" ? "image/png" :
+        ext === ".webp" ? "image/webp" :
+        "image/jpeg";
+      const storagePath = `products/${productId}/${Date.now()}-${safeName}`;
+
+      const { error: uploadError } = await supabase.storage
+        .from("product-images")
+        .upload(storagePath, file.data, { contentType: ct, upsert: true });
+
+      if (uploadError) {
+        sendJson(res, 500, { error: `Upload failed: ${uploadError.message}` });
+        return;
+      }
+
+      const { data: urlData } = supabase.storage
+        .from("product-images")
+        .getPublicUrl(storagePath);
+
+      // Check if product already has a primary image
+      const { data: existingImages } = await supabase
+        .from("product_images")
+        .select("id")
+        .eq("product_id", productId)
+        .eq("is_primary", true);
+
+      const isPrimary = !existingImages || existingImages.length === 0;
+
+      await supabase.from("product_images").insert({
+        product_id: productId,
+        storage_path: storagePath,
+        url: urlData.publicUrl,
+        is_primary: isPrimary,
+      });
+
+      console.log(`  Photo attached to: ${product.title}`);
+      console.log(`  URL: ${urlData.publicUrl}`);
+
+      sendJson(res, 200, {
+        product_id: productId,
+        image_url: urlData.publicUrl,
+        is_primary: isPrimary,
+      });
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });
     }
     return;
   }

@@ -1220,7 +1220,7 @@ async function handleRequest(
   }
 
   // API: attach photo to existing product
-  if (url === "/api/attach-photo" && req.method === "POST") {
+  if (url.startsWith("/api/attach-photo") && req.method === "POST") {
     try {
       const body = await readBody(req);
       const contentType = req.headers["content-type"] ?? "";

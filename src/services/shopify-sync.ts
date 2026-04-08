@@ -176,12 +176,13 @@ export async function pushProductToShopify(
 
     const variant = shopifyProduct.variants[0];
 
-    // Update our DB with Shopify IDs
+    // Update our DB with Shopify IDs and sync timestamp
     const { error: updateError } = await supabase
       .from("products")
       .update({
         shopify_product_id: String(shopifyProduct.id),
         shopify_variant_id: variant ? String(variant.id) : null,
+        shopify_synced_at: new Date().toISOString(),
         inventory_status:
           product.inventory_status === "in_stock"
             ? "listed_shopify"
@@ -208,7 +209,7 @@ export async function pushProductToShopify(
 // ---------------------------------------------------------------------------
 
 export async function pushAllToShopify(
-  filter?: { status?: string; category?: string }
+  filter?: { status?: string; category?: string; force?: boolean }
 ): Promise<PushResult[]> {
   let query = supabase
     .from("products")
@@ -229,8 +230,20 @@ export async function pushAllToShopify(
   }
 
   const results: PushResult[] = [];
+  let skipped = 0;
 
   for (const product of products as Product[]) {
+    // Skip products that haven't changed since last sync (unless forced or new)
+    if (
+      !filter?.force &&
+      product.shopify_product_id &&
+      product.shopify_synced_at &&
+      product.updated_at <= product.shopify_synced_at
+    ) {
+      skipped++;
+      continue;
+    }
+
     const r = await pushProductToShopify(product);
     const status = r.success ? (r.action === "created" ? "NEW" : "UPD") : "ERR";
     const price = product.current_price ?? product.market_price;
@@ -238,6 +251,10 @@ export async function pushAllToShopify(
       `  ${status}  ${r.title} - $${centsToPrice(price)} ${r.error ? `(${r.error})` : ""}`
     );
     results.push(r);
+  }
+
+  if (skipped > 0) {
+    console.log(`  (${skipped} unchanged product(s) skipped)`);
   }
 
   return results;

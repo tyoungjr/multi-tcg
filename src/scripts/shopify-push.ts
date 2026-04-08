@@ -12,6 +12,8 @@ function printUsage(): void {
   console.log("  npm run shopify:push -- --category trading_card  Only push trading cards");
   console.log("  npm run shopify:push -- --id <product-uuid>    Push a single product");
   console.log("  npm run shopify:push -- --dry-run              Preview without pushing");
+  console.log("  npm run shopify:push -- --force                Push all, even unchanged");
+  console.log("  npm run shopify:push -- --no-sync              Skip order sync + cleanup");
 }
 
 async function main(): Promise<void> {
@@ -122,7 +124,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  const results = await pushAllToShopify({ category });
+  const force = args.includes("--force");
+  const results = await pushAllToShopify({ category, force });
 
   const created = results.filter((r) => r.action === "created").length;
   const updated = results.filter((r) => r.action === "updated").length;

@@ -58,6 +58,7 @@ export interface Product {
   market_price: number | null;
   metadata: Record<string, unknown>;
   quantity: number;
+  shopify_synced_at: string | null;
   created_at: string;
   updated_at: string;
 }

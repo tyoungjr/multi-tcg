@@ -1,5 +1,5 @@
 import { supabase } from "../lib/supabase";
-import { shopifyPost, shopifyPut, shopifyGet, shopifyGetAll } from "../lib/shopify";
+import { shopifyPost, shopifyPut, shopifyGet, shopifyGetAll, shopifyDelete } from "../lib/shopify";
 import type { Product } from "../types/database";
 import type {
   ShopifyProduct,
@@ -29,6 +29,11 @@ function buildTags(product: Product): string {
   if (meta.platform) tags.push(String(meta.platform));
   if (meta.brand) tags.push(String(meta.brand));
   if (meta.rarity) tags.push(String(meta.rarity));
+  if (meta.product_type) tags.push(String(meta.product_type).replace("_", " "));
+  if (meta.variant) tags.push(String(meta.variant));
+  if (meta.pack_art) tags.push(String(meta.pack_art));
+  if (meta.bundle) tags.push("bundle");
+  if (meta.promo_label) tags.push(String(meta.promo_label));
 
   return tags.join(", ");
 }
@@ -86,8 +91,14 @@ function buildShopifyProduct(
   product: Product,
   images: ShopifyImageCreate[]
 ): { product: ShopifyProductCreate } {
-  const price = centsToPrice(product.current_price ?? product.market_price);
+  const meta = product.metadata as Record<string, unknown>;
+  const promoPriceCents = typeof meta.promo_price_cents === "number" ? meta.promo_price_cents : null;
+  const compareAtCents = typeof meta.compare_at_cents === "number" ? meta.compare_at_cents : null;
+
+  const price = centsToPrice(promoPriceCents ?? product.current_price ?? product.market_price);
   const compareAt =
+    compareAtCents ? centsToPrice(compareAtCents) :
+    promoPriceCents && product.current_price ? centsToPrice(product.current_price) :
     product.current_price && product.market_price && product.market_price > product.current_price
       ? centsToPrice(product.market_price)
       : undefined;
@@ -317,4 +328,72 @@ export async function syncOrders(
   }
 
   return { synced, skipped, errors };
+}
+
+// ---------------------------------------------------------------------------
+// Cleanup: archive/remove Shopify products that no longer exist in Supabase
+// or have been marked sold/deleted
+// ---------------------------------------------------------------------------
+
+export async function cleanupShopify(): Promise<{
+  archived: number;
+  errors: number;
+}> {
+  // Get all active Shopify products
+  const shopifyProducts = await shopifyGetAll<ShopifyProduct>(
+    "/products.json?status=active&fields=id,title",
+    "products"
+  );
+
+  if (shopifyProducts.length === 0) {
+    return { archived: 0, errors: 0 };
+  }
+
+  // Get all Supabase products that reference these Shopify IDs
+  const shopifyIds = shopifyProducts.map((p) => String(p.id));
+  const { data: dbProducts } = await supabase
+    .from("products")
+    .select("shopify_product_id, inventory_status")
+    .in("shopify_product_id", shopifyIds);
+
+  const activeInDb = new Set(
+    (dbProducts ?? [])
+      .filter((p: { inventory_status: string }) =>
+        p.inventory_status !== "sold"
+      )
+      .map((p: { shopify_product_id: string }) => p.shopify_product_id)
+  );
+
+  let archived = 0;
+  let errors = 0;
+
+  for (const sp of shopifyProducts) {
+    const spId = String(sp.id);
+    if (activeInDb.has(spId)) continue;
+
+    // This Shopify product is either deleted from DB, or marked sold
+    try {
+      // Set status to "draft" to remove from storefront without deleting
+      await shopifyPut(`/products/${spId}.json`, {
+        product: { id: sp.id, status: "draft" },
+      });
+      console.log(`  ARCHIVED  ${sp.title} (Shopify ${spId})`);
+
+      // Also clear the shopify IDs from any sold Supabase product
+      await supabase
+        .from("products")
+        .update({ shopify_product_id: null, shopify_variant_id: null })
+        .eq("shopify_product_id", spId)
+        .eq("inventory_status", "sold");
+
+      archived++;
+    } catch (err) {
+      console.error(
+        `  ERR  Failed to archive ${sp.title}: ${err instanceof Error ? err.message : err}`
+      );
+      errors++;
+    }
+  }
+
+  return { archived, errors };
 }

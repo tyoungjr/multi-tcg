@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-import { pushAllToShopify, pushProductToShopify } from "../services/shopify-sync";
+import { pushAllToShopify, pushProductToShopify, syncOrders, cleanupShopify } from "../services/shopify-sync";
 import { supabase } from "../lib/supabase";
 import type { Product } from "../types/database";
 
@@ -62,6 +62,35 @@ async function main(): Promise<void> {
   // Bulk push
   const catIdx = args.indexOf("--category");
   const category = catIdx !== -1 ? args[catIdx + 1] : undefined;
+  const skipSync = args.includes("--no-sync");
+
+  // Sync orders first to avoid re-listing sold items
+  if (!dryRun && !skipSync) {
+    console.log("Syncing Shopify orders first...");
+    const { synced, errors } = await syncOrders();
+    if (synced > 0) {
+      console.log(`  ${synced} item(s) marked sold.`);
+    }
+    if (errors > 0) {
+      console.log(`  ${errors} order sync error(s).`);
+    }
+    console.log("");
+  }
+
+  // Cleanup: archive Shopify products that were deleted/sold in Supabase
+  if (!dryRun && !skipSync) {
+    console.log("Cleaning up stale Shopify listings...");
+    const { archived, errors: cleanupErrors } = await cleanupShopify();
+    if (archived > 0) {
+      console.log(`  ${archived} listing(s) archived.`);
+    } else {
+      console.log("  All Shopify listings are in sync.");
+    }
+    if (cleanupErrors > 0) {
+      console.log(`  ${cleanupErrors} cleanup error(s).`);
+    }
+    console.log("");
+  }
 
   console.log(
     `Pushing${category ? ` ${category}` : ""} products to Shopify...${dryRun ? " (dry run)" : ""}\n`

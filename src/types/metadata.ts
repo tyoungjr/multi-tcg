@@ -1,4 +1,15 @@
-export interface TradingCardMetadata {
+// Shared fields any category can use for bundles, promos, and product variants
+export interface ListingMetadata {
+  bundle?: boolean;              // is this a bundle listing?
+  bundle_items?: string[];       // titles/IDs of items in the bundle
+  bundle_label?: string;         // e.g. "3-Pack", "Lot of 10", "Complete Set"
+  variant?: string;              // flavor/art/color variant, e.g. "Charizard art", "Blister - Pikachu"
+  promo_label?: string;          // sale label, e.g. "Bundle Deal", "Clearance", "BOGO"
+  promo_price_cents?: number;    // override price during a promo
+  compare_at_cents?: number;     // original price to show strikethrough
+}
+
+export interface TradingCardMetadata extends ListingMetadata {
   game?: string;
   set?: string;
   rarity?: string;
@@ -6,6 +17,8 @@ export interface TradingCardMetadata {
   edition?: string;
   language?: string;
   foil?: boolean;
+  product_type?: string;         // "single", "booster_pack", "booster_box", "etb", "blister", "tin", "bundle"
+  pack_art?: string;             // which art variant for booster packs
   psa_grade?: number;
   psa_cert_number?: string;
   bgs_grade?: number;

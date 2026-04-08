@@ -9,7 +9,7 @@ import {
   visualSearchFromFile,
 } from "../services/visual-search";
 import type { SearchOptions } from "../services/visual-search";
-import type { VisualSearchResult, PriceChartingMatch } from "../types/visual-search";
+import type { PriceChartingMatch } from "../types/visual-search";
 import type { Product, ProductInsert, ProductCategory, ProductCondition } from "../types/database";
 import { supabase } from "../lib/supabase";
 import { pushProductToShopify } from "../services/shopify-sync";
@@ -103,6 +103,22 @@ interface SnapResult {
   file_path: string;
 }
 
+// ---------------------------------------------------------------------------
+// Batch job queue (in-memory)
+// ---------------------------------------------------------------------------
+
+interface BatchJob {
+  id: string;
+  status: "processing" | "done" | "error";
+  file_path: string;
+  result?: SnapResult;
+  error?: string;
+  created_at: number;
+  saved?: boolean;
+}
+
+const jobQueue = new Map<string, BatchJob>();
+
 async function identifyImage(filePath: string): Promise<SnapResult> {
   const options: SearchOptions = {};
   const result = await visualSearchFromFile(filePath, options);
@@ -121,6 +137,26 @@ async function identifyImage(filePath: string): Promise<SnapResult> {
     price_source: result.price_source,
     file_path: filePath,
   };
+}
+
+function enqueuePhoto(filePath: string): string {
+  const id = `job-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const job: BatchJob = { id, status: "processing", file_path: filePath, created_at: Date.now() };
+  jobQueue.set(id, job);
+
+  identifyImage(filePath)
+    .then((result) => {
+      job.status = "done";
+      job.result = result;
+      console.log(`  [batch] Done: ${result.identification.title}`);
+    })
+    .catch((err) => {
+      job.status = "error";
+      job.error = err instanceof Error ? err.message : "Unknown error";
+      console.error(`  [batch] Failed: ${id}`, err);
+    });
+
+  return id;
 }
 
 // ---------------------------------------------------------------------------
@@ -374,6 +410,7 @@ function getCameraPage(): string {
     <div class="status-dot"></div>
     <h1 style="flex:1">Snap & Sell</h1>
     <a href="/inventory" style="color:#60a5fa;font-size:13px;text-decoration:none;padding:6px 12px;background:#222;border-radius:4px;">Inventory</a>
+    <a href="/batch" style="color:#60a5fa;font-size:13px;text-decoration:none;padding:6px 12px;background:#222;border-radius:4px;">Batch</a>
   </div>
 
   <!-- Screen 1: Capture -->
@@ -671,6 +708,462 @@ function getCameraPage(): string {
 }
 
 // ---------------------------------------------------------------------------
+// Batch queue page
+// ---------------------------------------------------------------------------
+
+function getBatchPage(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Batch Queue - Snap & Sell</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, system-ui, sans-serif;
+      background: #111; color: #eee;
+      min-height: 100dvh;
+      padding-bottom: 80px;
+    }
+    .header {
+      padding: 12px 16px;
+      background: #1a1a1a;
+      border-bottom: 1px solid #333;
+      position: sticky; top: 0; z-index: 10;
+    }
+    .header-nav { display: flex; gap: 8px; margin-bottom: 8px; }
+    .header-nav a {
+      color: #60a5fa; text-decoration: none; font-size: 13px;
+      padding: 4px 8px; background: #222; border-radius: 4px;
+    }
+    .header-nav a.active { background: #2563eb; color: white; }
+    .snap-row {
+      display: flex; gap: 10px; align-items: center; margin-top: 4px;
+    }
+    .snap-btn-sm {
+      padding: 12px 24px; background: #2563eb; border: none;
+      border-radius: 8px; color: white; font-size: 15px; font-weight: 600;
+      cursor: pointer; flex-shrink: 0;
+    }
+    .snap-btn-sm:active { background: #1d4ed8; }
+    .snap-btn-sm:disabled { opacity: 0.5; }
+    .snap-status { font-size: 13px; color: #aaa; }
+    .badge {
+      display: inline-block; background: #f59e0b; color: #111;
+      font-size: 11px; font-weight: 700; border-radius: 10px;
+      padding: 1px 7px; margin-left: 6px; vertical-align: middle;
+    }
+    input[type="file"] { display: none; }
+
+    .queue { padding: 8px; }
+    .empty { text-align: center; padding: 60px 20px; color: #666; font-size: 15px; }
+
+    .job-card {
+      background: #1a1a1a; border: 1px solid #333;
+      border-radius: 8px; margin-bottom: 8px; overflow: hidden;
+    }
+    .job-card.processing { border-left: 3px solid #f59e0b; }
+    .job-card.done { border-left: 3px solid #4ade80; }
+    .job-card.error { border-left: 3px solid #ef4444; }
+
+    /* Processing */
+    .proc-inner {
+      display: flex; align-items: center; gap: 12px; padding: 14px;
+    }
+    .spinner-sm {
+      width: 24px; height: 24px; border: 3px solid #333;
+      border-top-color: #f59e0b; border-radius: 50%;
+      animation: spin 0.8s linear infinite; flex-shrink: 0;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .proc-name { font-size: 13px; color: #888; }
+
+    /* Error */
+    .err-inner { padding: 14px; display: flex; justify-content: space-between; align-items: center; }
+    .err-msg { font-size: 13px; color: #ef4444; }
+
+    /* Done */
+    .done-inner { padding: 12px; }
+    .done-row { display: flex; gap: 10px; align-items: flex-start; }
+    .job-thumb {
+      width: 72px; height: 72px; object-fit: cover;
+      border-radius: 6px; background: #000; flex-shrink: 0;
+    }
+    .done-fields { flex: 1; display: flex; flex-direction: column; gap: 6px; }
+    .done-fields input, .done-fields select {
+      width: 100%; padding: 8px; font-size: 15px;
+      background: #222; border: 1px solid #444; border-radius: 6px;
+      color: #eee; outline: none;
+    }
+    .done-fields input:focus, .done-fields select:focus { border-color: #2563eb; }
+    .price-row { display: flex; gap: 6px; }
+    .price-row input { flex: 1; }
+    .price-row select { flex: 1; }
+
+    .skip-btn {
+      padding: 6px 12px; background: #333; border: none;
+      border-radius: 6px; color: #aaa; font-size: 12px; cursor: pointer;
+      flex-shrink: 0; align-self: flex-start;
+    }
+    .skip-btn:active { background: #444; }
+
+    /* PC candidates */
+    .pc-label { font-size: 11px; color: #666; margin: 8px 0 4px; }
+    .pc-candidates { display: flex; flex-direction: column; gap: 3px; }
+    .pc-item {
+      padding: 8px 10px; background: #222; border: 2px solid transparent;
+      border-radius: 5px; cursor: pointer; font-size: 12px; color: #ccc;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .pc-item.selected { border-color: #2563eb; background: #1e293b; color: #fff; }
+    .pc-price { color: #4ade80; margin-left: 8px; flex-shrink: 0; }
+
+    /* Bottom bar */
+    .bottom-bar {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: #1a1a1a; border-top: 1px solid #333;
+      padding: 12px 16px; display: flex; gap: 8px; z-index: 10;
+    }
+    .bottom-bar button {
+      flex: 1; padding: 14px; border: none; border-radius: 8px;
+      font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    .btn-save { background: #2563eb; color: white; }
+    .btn-save:active { background: #1d4ed8; }
+    .btn-shopify { background: #16a34a; color: white; }
+    .btn-shopify:active { background: #15803d; }
+    .btn-save:disabled, .btn-shopify:disabled { opacity: 0.4; }
+
+    .result-banner {
+      margin: 8px; padding: 12px; border-radius: 8px;
+      background: #16a34a; color: white; font-size: 14px; font-weight: 600;
+      text-align: center; display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-nav">
+      <a href="/">Snap</a>
+      <a href="/inventory">Inventory</a>
+      <a href="/batch" class="active">Batch <span id="proc-badge" class="badge" style="display:none"></span></a>
+    </div>
+    <div class="snap-row">
+      <button class="snap-btn-sm" id="snap-btn">SNAP</button>
+      <span class="snap-status" id="snap-status">Snap items one by one, review all at once</span>
+    </div>
+    <input type="file" id="file-input" accept="image/*" capture="environment">
+  </div>
+
+  <div class="result-banner" id="result-banner"></div>
+  <div class="queue" id="queue-list"></div>
+
+  <div class="bottom-bar">
+    <button class="btn-save" id="save-btn" disabled>Save All to DB</button>
+    <button class="btn-shopify" id="shopify-btn" disabled>Save + Shopify</button>
+  </div>
+
+  <script>
+    const jobData = {};       // job_id -> full job from server
+    const knownIds = new Set();
+    let pollTimer = null;
+
+    // -----------------------------------------------------------------------
+    // Snap
+    // -----------------------------------------------------------------------
+
+    document.getElementById('snap-btn').onclick = () => {
+      document.getElementById('file-input').click();
+    };
+
+    document.getElementById('file-input').onchange = async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      e.target.value = '';
+
+      const btn = document.getElementById('snap-btn');
+      btn.disabled = true;
+      document.getElementById('snap-status').textContent = 'Uploading...';
+
+      const fd = new FormData();
+      fd.append('photo', file);
+
+      try {
+        const resp = await fetch('/api/queue', { method: 'POST', body: fd });
+        const { job_id, file_path } = await resp.json();
+
+        knownIds.add(job_id);
+        jobData[job_id] = { id: job_id, status: 'processing', file_path };
+        prependCard(job_id, file.name);
+        document.getElementById('snap-status').textContent = 'Queued! Snap another.';
+      } catch (err) {
+        document.getElementById('snap-status').textContent = 'Upload failed: ' + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    };
+
+    // -----------------------------------------------------------------------
+    // Card rendering
+    // -----------------------------------------------------------------------
+
+    function escHtml(s) {
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function formatCents(c) {
+      if (!c || c <= 0) return '-';
+      return '$' + (c / 100).toFixed(2);
+    }
+    function mapCond(est) {
+      if (!est) return 'loose';
+      const m = { 'mint':'new_sealed','near mint':'cib','lightly played':'good','moderately played':'good','heavily played':'loose','damaged':'loose' };
+      return m[est.toLowerCase()] || 'loose';
+    }
+    function selOpt(val, target) {
+      return val === target ? 'selected' : '';
+    }
+
+    function prependCard(jobId, filename) {
+      const list = document.getElementById('queue-list');
+      const div = document.createElement('div');
+      div.id = 'job-' + jobId;
+      div.className = 'job-card processing';
+      div.dataset.status = 'processing';
+      div.innerHTML = '<div class="proc-inner"><div class="spinner-sm"></div><div class="proc-name">Identifying ' + escHtml(filename) + '...</div></div>';
+      list.insertBefore(div, list.firstChild);
+      renderEmpty();
+      updateCounts();
+    }
+
+    function settleCard(job) {
+      const card = document.getElementById('job-' + job.id);
+      if (!card) return;
+      if (card.dataset.status === 'done' || card.dataset.status === 'error') return;
+
+      card.dataset.status = job.status;
+
+      if (job.status === 'error') {
+        card.className = 'job-card error';
+        card.innerHTML = '<div class="err-inner"><span class="err-msg">Error: ' + escHtml(job.error) + '</span><button class="skip-btn" onclick="removeCard(\\'' + job.id + '\\')">Dismiss</button></div>';
+        return;
+      }
+
+      card.className = 'job-card done';
+      const id = job.result.identification;
+      const pc = job.result.pricecharting;
+      const candidates = job.result.pc_candidates || [];
+      const price = job.result.suggested_market_price_cents || 0;
+      const condVal = mapCond(id.details ? id.details.condition_estimate : null);
+      const thumb = '/api/preview/' + encodeURIComponent(job.file_path);
+
+      let pcHtml = '';
+      if (candidates.length > 0) {
+        pcHtml = '<div class="pc-label">PriceCharting match - tap to change:</div><div class="pc-candidates" id="pcc-' + job.id + '">' +
+          '<div class="pc-item" data-id="" data-price="0" onclick="selectPc(this,\\'' + job.id + '\\')"><span style="color:#888">None - use manual title</span><span class="pc-price">-</span></div>' +
+          candidates.map(c => {
+            const p = c.loose_price_cents || c.cib_price_cents || c.new_price_cents || 0;
+            const sel = pc && c.pricecharting_id === pc.pricecharting_id ? ' selected' : '';
+            return '<div class="pc-item' + sel + '" data-id="' + escHtml(c.pricecharting_id) + '" data-price="' + p + '" onclick="selectPc(this,\\'' + job.id + '\\')"><span>' + escHtml(c.product_name) + ' (' + escHtml(c.console_name) + ')</span><span class="pc-price">' + formatCents(p) + '</span></div>';
+          }).join('') +
+        '</div>';
+      }
+
+      card.innerHTML =
+        '<div class="done-inner">' +
+          '<div class="done-row">' +
+            '<img class="job-thumb" src="' + thumb + '" loading="lazy">' +
+            '<div class="done-fields">' +
+              '<input id="title-' + job.id + '" type="text" value="' + escHtml(id.title) + '">' +
+              '<div class="price-row">' +
+                '<input id="price-' + job.id + '" type="number" step="0.01" inputmode="decimal" placeholder="Price $" value="' + (price > 0 ? (price / 100).toFixed(2) : '') + '">' +
+                '<select id="cond-' + job.id + '">' +
+                  '<option value="loose" ' + selOpt(condVal,'loose') + '>Loose</option>' +
+                  '<option value="good" ' + selOpt(condVal,'good') + '>Good</option>' +
+                  '<option value="very_good" ' + selOpt(condVal,'very_good') + '>Very Good</option>' +
+                  '<option value="cib" ' + selOpt(condVal,'cib') + '>CIB</option>' +
+                  '<option value="new_sealed" ' + selOpt(condVal,'new_sealed') + '>New/Sealed</option>' +
+                  '<option value="graded" ' + selOpt(condVal,'graded') + '>Graded</option>' +
+                '</select>' +
+              '</div>' +
+            '</div>' +
+            '<button class="skip-btn" onclick="removeCard(\\'' + job.id + '\\')">Skip</button>' +
+          '</div>' +
+          pcHtml +
+        '</div>';
+    }
+
+    function selectPc(el, jobId) {
+      const container = document.getElementById('pcc-' + jobId);
+      container.querySelectorAll('.pc-item').forEach(x => x.classList.remove('selected'));
+      el.classList.add('selected');
+      const price = parseInt(el.dataset.price) || 0;
+      const priceEl = document.getElementById('price-' + jobId);
+      const titleEl = document.getElementById('title-' + jobId);
+      if (price > 0) {
+        priceEl.value = (price / 100).toFixed(2);
+      }
+      // Update title to match selected candidate (grab text before the price span)
+      const nameSpan = el.querySelector('span');
+      if (nameSpan && el.dataset.id) {
+        titleEl.value = nameSpan.textContent;
+      }
+    }
+
+    function removeCard(jobId) {
+      const card = document.getElementById('job-' + jobId);
+      if (card) card.remove();
+      fetch('/api/queue/' + encodeURIComponent(jobId), { method: 'DELETE' }).catch(() => {});
+      delete jobData[jobId];
+      knownIds.delete(jobId);
+      renderEmpty();
+      updateCounts();
+    }
+
+    function renderEmpty() {
+      const list = document.getElementById('queue-list');
+      const hasDone = list.querySelector('.job-card.done, .job-card.processing');
+      if (!hasDone) {
+        list.innerHTML = '<div class="empty">Snap items above to add them to the queue</div>';
+      }
+    }
+
+    function updateCounts() {
+      const processing = document.querySelectorAll('.job-card.processing').length;
+      const done = document.querySelectorAll('.job-card.done').length;
+      const badge = document.getElementById('proc-badge');
+      if (processing > 0) {
+        badge.textContent = processing + ' processing';
+        badge.style.display = '';
+      } else {
+        badge.style.display = 'none';
+      }
+      document.getElementById('save-btn').disabled = done === 0;
+      document.getElementById('shopify-btn').disabled = done === 0;
+    }
+
+    // -----------------------------------------------------------------------
+    // Polling
+    // -----------------------------------------------------------------------
+
+    async function poll() {
+      try {
+        const resp = await fetch('/api/queue');
+        const jobs = await resp.json();
+        for (const job of jobs) {
+          if (job.saved) continue;
+          jobData[job.id] = job;
+          if (!knownIds.has(job.id)) {
+            knownIds.add(job.id);
+            const filename = job.file_path.split(/[\\/]/).pop() || job.id;
+            prependCard(job.id, filename);
+          }
+          if (job.status !== 'processing') {
+            settleCard(job);
+          }
+        }
+        updateCounts();
+      } catch (e) { /* ignore */ }
+    }
+
+    poll();
+    pollTimer = setInterval(poll, 2000);
+
+    // -----------------------------------------------------------------------
+    // Save
+    // -----------------------------------------------------------------------
+
+    document.getElementById('save-btn').onclick = () => doSaveAll(false);
+    document.getElementById('shopify-btn').onclick = () => doSaveAll(true);
+
+    async function doSaveAll(listOnShopify) {
+      const cards = document.querySelectorAll('.job-card.done');
+      if (cards.length === 0) return;
+
+      const items = [];
+      for (const card of cards) {
+        const jobId = card.id.replace('job-', '');
+        const job = jobData[jobId];
+        if (!job || !job.result) continue;
+
+        const title = document.getElementById('title-' + jobId).value.trim();
+        const priceStr = document.getElementById('price-' + jobId).value;
+        const priceCents = Math.round(parseFloat(priceStr || '0') * 100);
+        const condition = document.getElementById('cond-' + jobId).value;
+        const selectedPc = card.querySelector('.pc-item.selected');
+        const pcId = selectedPc ? selectedPc.dataset.id : (job.result.pricecharting ? job.result.pricecharting.pricecharting_id : undefined);
+
+        if (!title) continue;
+
+        if (listOnShopify && priceCents <= 0) {
+          alert('Set a price for "' + title + '" before pushing to Shopify');
+          return;
+        }
+
+        items.push({
+          job_id: jobId,
+          file_path: job.file_path,
+          title,
+          category: job.result.identification.category,
+          condition,
+          price_cents: priceCents,
+          status: 'in_stock',
+          quantity: 1,
+          pricecharting_id: pcId || undefined,
+          market_price_cents: job.result.suggested_market_price_cents || undefined,
+          description: job.result.identification.description,
+          metadata: job.result.identification.details,
+          list_on_shopify: listOnShopify,
+        });
+      }
+
+      if (items.length === 0) return;
+
+      document.getElementById('save-btn').disabled = true;
+      document.getElementById('shopify-btn').disabled = true;
+      document.getElementById('snap-status').textContent = 'Saving ' + items.length + ' items...';
+
+      try {
+        const resp = await fetch('/api/batch-save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ items }),
+        });
+        const results = await resp.json();
+
+        let saved = 0, failed = 0;
+        for (const r of results) {
+          if (r.error) {
+            failed++;
+          } else {
+            saved++;
+            removeCard(r.job_id);
+            if (jobData[r.job_id]) jobData[r.job_id].saved = true;
+          }
+        }
+
+        const banner = document.getElementById('result-banner');
+        const shopifyNote = listOnShopify ? ' and listed on Shopify' : '';
+        banner.textContent = saved + ' item' + (saved !== 1 ? 's' : '') + ' saved' + shopifyNote + (failed > 0 ? ' (' + failed + ' failed)' : '') + '.';
+        banner.style.display = '';
+        setTimeout(() => { banner.style.display = 'none'; }, 4000);
+
+        document.getElementById('snap-status').textContent = 'Done! Snap more items.';
+      } catch (err) {
+        alert('Save failed: ' + err.message);
+      } finally {
+        updateCounts();
+      }
+    }
+
+    renderEmpty();
+  </script>
+</body>
+</html>`;
+}
+
+// ---------------------------------------------------------------------------
 // Inventory browse page
 // ---------------------------------------------------------------------------
 
@@ -835,6 +1328,7 @@ function getInventoryPage(): string {
       <input type="file" class="modal-file" id="modal-file" accept="image/*" capture="environment">
       <div id="modal-success" style="display:none"></div>
       <button class="cancel-btn" id="modal-cancel">Cancel</button>
+      <button class="cancel-btn" id="modal-delete" style="background:#dc2626;color:white;margin-top:4px;">Delete Item</button>
     </div>
   </div>
 
@@ -946,6 +1440,32 @@ function getInventoryPage(): string {
 
     document.getElementById('modal-cancel').onclick = () => {
       document.getElementById('modal').classList.remove('active');
+    };
+
+    document.getElementById('modal-delete').onclick = async () => {
+      if (!selectedProductId) return;
+      if (!confirm('Delete this item from inventory? This cannot be undone.')) return;
+
+      document.getElementById('modal-delete').textContent = 'Deleting...';
+      document.getElementById('modal-delete').disabled = true;
+
+      try {
+        const resp = await fetch('/api/product/' + selectedProductId, { method: 'DELETE' });
+        const result = await resp.json();
+
+        if (result.error) {
+          alert('Delete failed: ' + result.error);
+        } else {
+          document.getElementById('modal').classList.remove('active');
+          currentPage = 1;
+          loadProducts(1, false);
+        }
+      } catch (err) {
+        alert('Error: ' + err.message);
+      } finally {
+        document.getElementById('modal-delete').textContent = 'Delete Item';
+        document.getElementById('modal-delete').disabled = false;
+      }
     };
 
     document.getElementById('modal-snap').onclick = () => {
@@ -1282,14 +1802,27 @@ async function handleRequest(
         .from("product-images")
         .getPublicUrl(storagePath);
 
-      // Check if product already has a primary image
+      // Replace existing primary image if there is one
       const { data: existingImages } = await supabase
         .from("product_images")
-        .select("id")
+        .select("id, storage_path")
         .eq("product_id", productId)
         .eq("is_primary", true);
 
-      const isPrimary = !existingImages || existingImages.length === 0;
+      if (existingImages && existingImages.length > 0) {
+        // Remove old images from storage
+        const oldPaths = existingImages
+          .map((i: { storage_path: string | null }) => i.storage_path)
+          .filter(Boolean) as string[];
+        if (oldPaths.length > 0) {
+          await supabase.storage.from("product-images").remove(oldPaths);
+        }
+        // Delete old image records
+        const oldIds = existingImages.map((i: { id: string }) => i.id);
+        await supabase.from("product_images").delete().in("id", oldIds);
+      }
+
+      const isPrimary = true;
 
       await supabase.from("product_images").insert({
         product_id: productId,
@@ -1307,6 +1840,161 @@ async function handleRequest(
         is_primary: isPrimary,
       });
     } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });
+    }
+    return;
+  }
+
+  // Delete a product from Supabase (+ images from storage)
+  if (url.startsWith("/api/product/") && req.method === "DELETE") {
+    try {
+      const productId = decodeURIComponent(url.slice("/api/product/".length));
+
+      // Get image storage paths to clean up
+      const { data: images } = await supabase
+        .from("product_images")
+        .select("storage_path")
+        .eq("product_id", productId);
+
+      // Delete images from storage
+      if (images && images.length > 0) {
+        const paths = images
+          .map((i: { storage_path: string | null }) => i.storage_path)
+          .filter(Boolean) as string[];
+        if (paths.length > 0) {
+          await supabase.storage.from("product-images").remove(paths);
+        }
+      }
+
+      // Delete image records
+      await supabase.from("product_images").delete().eq("product_id", productId);
+
+      // Delete price history
+      await supabase.from("price_history").delete().eq("product_id", productId);
+
+      // Delete the product
+      const { error } = await supabase.from("products").delete().eq("id", productId);
+
+      if (error) {
+        sendJson(res, 500, { error: error.message });
+        return;
+      }
+
+      console.log(`Deleted product: ${productId}`);
+      sendJson(res, 200, { deleted: true, product_id: productId });
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });
+    }
+    return;
+  }
+
+  // Batch queue page
+  if (url === "/batch" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(getBatchPage());
+    return;
+  }
+
+  // Enqueue a photo for background identification
+  if (url === "/api/queue" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      const contentType = req.headers["content-type"] ?? "";
+      const file = parseMultipart(body, contentType);
+
+      if (!file || file.data.length === 0) {
+        sendJson(res, 400, { error: "No image received" });
+        return;
+      }
+
+      if (!existsSync(INBOX_DIR)) {
+        mkdirSync(INBOX_DIR, { recursive: true });
+      }
+
+      const timestamp = Date.now();
+      const safeName = file.filename.replace(/[^a-zA-Z0-9._-]/g, "_");
+      const filePath = join(INBOX_DIR, `${timestamp}-${safeName}`);
+      writeFileSync(filePath, file.data);
+
+      console.log(`[batch] Queued: ${safeName} (${(file.data.length / 1024).toFixed(0)}KB)`);
+
+      const jobId = enqueuePhoto(filePath);
+      sendJson(res, 200, { job_id: jobId, file_path: filePath });
+    } catch (err) {
+      console.error("Queue failed:", err);
+      sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });
+    }
+    return;
+  }
+
+  // Delete a job from the queue
+  if (url.startsWith("/api/queue/") && req.method === "DELETE") {
+    const jobId = decodeURIComponent(url.slice("/api/queue/".length));
+    const deleted = jobQueue.delete(jobId);
+    console.log(`[batch] Deleted job ${jobId}: ${deleted ? "ok" : "not found"}`);
+    sendJson(res, deleted ? 200 : 404, { deleted });
+    return;
+  }
+
+  // Get all jobs in the queue
+  if (url === "/api/queue" && req.method === "GET") {
+    const jobs = Array.from(jobQueue.values())
+      .sort((a, b) => b.created_at - a.created_at);
+    sendJson(res, 200, jobs);
+    return;
+  }
+
+  // Batch save multiple items
+  if (url === "/api/batch-save" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      const { items } = JSON.parse(body.toString()) as { items: (SaveRequest & { job_id: string })[] };
+
+      if (!Array.isArray(items) || items.length === 0) {
+        sendJson(res, 400, { error: "No items provided" });
+        return;
+      }
+
+      console.log(`[batch] Saving ${items.length} items...`);
+
+      const results: { job_id: string; product_id?: string; shopify_product_id?: string; error?: string }[] = [];
+
+      for (const item of items) {
+        const saveReq: SaveRequest = {
+          file_path: item.file_path,
+          title: item.title,
+          category: item.category,
+          condition: item.condition,
+          price_cents: item.price_cents,
+          status: item.status ?? "in_stock",
+          notes: item.notes,
+          quantity: item.quantity ?? 1,
+          pricecharting_id: item.pricecharting_id,
+          market_price_cents: item.market_price_cents,
+          description: item.description,
+          metadata: item.metadata,
+          list_on_shopify: item.list_on_shopify,
+        };
+
+        const result = await saveAndList(saveReq);
+
+        if (!result.error) {
+          const job = jobQueue.get(item.job_id);
+          if (job) job.saved = true;
+          console.log(`  [batch] Saved: ${item.title} (${result.product_id})`);
+          if (result.shopify_product_id) {
+            console.log(`  [batch] Listed on Shopify: ${result.shopify_product_id}`);
+          }
+        } else {
+          console.error(`  [batch] Failed: ${item.title} - ${result.error}`);
+        }
+
+        results.push({ job_id: item.job_id, ...result });
+      }
+
+      sendJson(res, 200, results);
+    } catch (err) {
+      console.error("Batch save failed:", err);
       sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });
     }
     return;

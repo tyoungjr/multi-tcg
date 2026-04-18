@@ -1320,10 +1320,56 @@ function getInventoryPage(): string {
 
   <!-- Photo attach modal -->
   <div class="modal-overlay" id="modal">
-    <div class="modal-card">
+    <div class="modal-card" style="max-height:90vh;overflow-y:auto;">
       <h2 id="modal-title"></h2>
       <div class="detail" id="modal-detail"></div>
       <img class="modal-preview" id="modal-preview" style="display:none">
+
+      <!-- Edit form -->
+      <div style="margin:12px 0;padding-top:12px;border-top:1px solid #333;">
+        <div style="font-size:12px;color:#888;margin-bottom:6px;">Edit</div>
+        <div style="display:flex;gap:6px;margin-bottom:6px;">
+          <input id="edit-price" type="number" step="0.01" inputmode="decimal" placeholder="Price $"
+            style="flex:1;padding:8px;font-size:14px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
+          <input id="edit-qty" type="number" inputmode="numeric" placeholder="Qty"
+            style="width:70px;padding:8px;font-size:14px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
+        </div>
+        <select id="edit-condition"
+          style="width:100%;padding:8px;font-size:14px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;margin-bottom:6px;">
+          <option value="">Condition...</option>
+          <option value="loose">Loose</option>
+          <option value="good">Good</option>
+          <option value="very_good">Very Good</option>
+          <option value="cib">CIB</option>
+          <option value="new_sealed">New/Sealed</option>
+          <option value="graded">Graded</option>
+        </select>
+        <select id="edit-status"
+          style="width:100%;padding:8px;font-size:14px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;margin-bottom:6px;">
+          <option value="in_stock">In Stock</option>
+          <option value="listed_shopify">Listed Shopify</option>
+          <option value="listed_ebay">Listed eBay</option>
+          <option value="listed_multi">Listed Multi</option>
+          <option value="sold">Sold</option>
+          <option value="personal_collection">Personal</option>
+        </select>
+        <div id="grading-row" style="display:none;gap:6px;margin-bottom:6px;">
+          <select id="edit-grading-company"
+            style="flex:1;padding:8px;font-size:14px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
+            <option value="">Grader...</option>
+            <option value="PSA">PSA</option>
+            <option value="BGS">BGS</option>
+            <option value="CGC">CGC</option>
+            <option value="SGC">SGC</option>
+          </select>
+          <input id="edit-grade" type="number" step="0.5" inputmode="decimal" placeholder="Grade"
+            style="width:90px;padding:8px;font-size:14px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
+        </div>
+        <input id="edit-notes" type="text" placeholder="Notes / purchase info"
+          style="width:100%;padding:8px;font-size:14px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;margin-bottom:6px;">
+        <button class="snap-btn" id="modal-save" style="background:#16a34a;">Save Changes</button>
+      </div>
+
       <button class="snap-btn" id="modal-snap">Take Photo</button>
       <input type="file" class="modal-file" id="modal-file" accept="image/*" capture="environment">
       <div id="modal-success" style="display:none"></div>
@@ -1433,10 +1479,78 @@ function getInventoryPage(): string {
         preview.style.display = 'none';
       }
 
+      // Pre-fill edit form
+      document.getElementById('edit-price').value = product.current_price ? (product.current_price / 100).toFixed(2) : '';
+      document.getElementById('edit-qty').value = product.quantity ?? 1;
+      document.getElementById('edit-condition').value = product.condition ?? '';
+      document.getElementById('edit-status').value = product.inventory_status ?? 'in_stock';
+      document.getElementById('edit-notes').value = product.purchase_notes ?? '';
+      document.getElementById('edit-grading-company').value = product.grading_company ?? '';
+      document.getElementById('edit-grade').value = product.graded_score ?? '';
+
+      const gradingRow = document.getElementById('grading-row');
+      gradingRow.style.display = product.condition === 'graded' ? 'flex' : 'none';
+
       document.getElementById('modal-success').style.display = 'none';
       document.getElementById('modal-snap').textContent = existingImg ? 'Replace Photo' : 'Take Photo';
+      document.getElementById('modal-save').textContent = 'Save Changes';
+      document.getElementById('modal-save').disabled = false;
       document.getElementById('modal').classList.add('active');
     }
+
+    // Show grading fields only when condition is graded
+    document.getElementById('edit-condition').onchange = (e) => {
+      document.getElementById('grading-row').style.display = e.target.value === 'graded' ? 'flex' : 'none';
+    };
+
+    document.getElementById('modal-save').onclick = async () => {
+      if (!selectedProductId) return;
+
+      const btn = document.getElementById('modal-save');
+      btn.textContent = 'Saving...';
+      btn.disabled = true;
+
+      const priceStr = document.getElementById('edit-price').value;
+      const priceCents = priceStr ? Math.round(parseFloat(priceStr) * 100) : null;
+      const gradeStr = document.getElementById('edit-grade').value;
+      const condition = document.getElementById('edit-condition').value;
+
+      const body = {
+        current_price: priceCents,
+        quantity: parseInt(document.getElementById('edit-qty').value) || 1,
+        condition: condition || null,
+        inventory_status: document.getElementById('edit-status').value,
+        purchase_notes: document.getElementById('edit-notes').value || null,
+        grading_company: condition === 'graded' ? (document.getElementById('edit-grading-company').value || null) : null,
+        graded_score: condition === 'graded' && gradeStr ? parseFloat(gradeStr) : null,
+      };
+
+      try {
+        const resp = await fetch('/api/product/' + selectedProductId, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const result = await resp.json();
+
+        if (result.error) {
+          alert('Save failed: ' + result.error);
+        } else {
+          document.getElementById('modal-success').innerHTML = '<div class="success">Saved</div>';
+          document.getElementById('modal-success').style.display = '';
+          setTimeout(() => {
+            document.getElementById('modal').classList.remove('active');
+            currentPage = 1;
+            loadProducts(1, false);
+          }, 900);
+        }
+      } catch (err) {
+        alert('Error: ' + err.message);
+      } finally {
+        btn.textContent = 'Save Changes';
+        btn.disabled = false;
+      }
+    };
 
     document.getElementById('modal-cancel').onclick = () => {
       document.getElementById('modal').classList.remove('active');
@@ -1492,30 +1606,21 @@ function getInventoryPage(): string {
         if (result.error) {
           alert('Failed: ' + result.error);
         } else {
-          // Show success
+          // Update preview + photo cache; leave modal open so edits can still be saved
           const preview = document.getElementById('modal-preview');
-          preview.src = result.image_url;
+          preview.src = result.image_url + '?t=' + Date.now();
           preview.style.display = '';
 
           document.getElementById('modal-success').innerHTML =
-            '<div class="success">Photo attached!</div>';
+            '<div class="success">Photo attached. Don\\'t forget to Save Changes if you edited fields.</div>';
           document.getElementById('modal-success').style.display = '';
 
-          // Update photo status
           photoStatus[selectedProductId] = [result.image_url];
-
-          // Close after delay
-          setTimeout(() => {
-            document.getElementById('modal').classList.remove('active');
-            // Refresh list to show updated photo
-            currentPage = 1;
-            loadProducts(1, false);
-          }, 1500);
         }
       } catch (err) {
         alert('Error: ' + err.message);
       } finally {
-        document.getElementById('modal-snap').textContent = 'Take Photo';
+        document.getElementById('modal-snap').textContent = 'Replace Photo';
         document.getElementById('modal-snap').disabled = false;
         e.target.value = '';
       }
@@ -1701,7 +1806,7 @@ async function handleRequest(
 
       let query = supabase
         .from("products")
-        .select("id, title, category, condition, inventory_status, current_price, market_price, quantity, metadata, pricecharting_id", { count: "exact" });
+        .select("id, title, category, condition, inventory_status, current_price, market_price, quantity, metadata, pricecharting_id, purchase_notes, grading_company, graded_score", { count: "exact" });
 
       if (search) {
         query = query.ilike("title", `%${search}%`);
@@ -1839,6 +1944,55 @@ async function handleRequest(
         image_url: urlData.publicUrl,
         is_primary: isPrimary,
       });
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });
+    }
+    return;
+  }
+
+  // Update editable fields on a product
+  if (url.startsWith("/api/product/") && req.method === "PATCH") {
+    try {
+      const productId = decodeURIComponent(url.slice("/api/product/".length));
+      const body = await readBody(req);
+      const patch = JSON.parse(body.toString()) as Record<string, unknown>;
+
+      // Whitelist editable fields
+      const allowed = [
+        "current_price",
+        "market_price",
+        "quantity",
+        "condition",
+        "inventory_status",
+        "purchase_notes",
+        "grading_company",
+        "graded_score",
+        "description",
+        "title",
+        "metadata",
+      ];
+      const update: Record<string, unknown> = {};
+      for (const key of allowed) {
+        if (key in patch) update[key] = patch[key];
+      }
+
+      if (Object.keys(update).length === 0) {
+        sendJson(res, 400, { error: "No editable fields provided" });
+        return;
+      }
+
+      const { error } = await supabase
+        .from("products")
+        .update(update)
+        .eq("id", productId);
+
+      if (error) {
+        sendJson(res, 500, { error: error.message });
+        return;
+      }
+
+      console.log(`Updated product ${productId}: ${Object.keys(update).join(", ")}`);
+      sendJson(res, 200, { updated: true, product_id: productId });
     } catch (err) {
       sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });
     }

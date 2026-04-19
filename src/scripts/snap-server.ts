@@ -13,6 +13,7 @@ import type { PriceChartingMatch } from "../types/visual-search";
 import type { Product, ProductInsert, ProductCategory, ProductCondition } from "../types/database";
 import { supabase } from "../lib/supabase";
 import { pushProductToShopify } from "../services/shopify-sync";
+import { getProductById } from "../lib/pricecharting";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -176,6 +177,8 @@ interface SaveRequest {
   market_price_cents?: number;
   description?: string;
   metadata?: Record<string, unknown>;
+  grading_company?: string | null;
+  graded_score?: number | null;
   list_on_shopify: boolean;
 }
 
@@ -195,6 +198,8 @@ async function saveAndList(req: SaveRequest): Promise<{
     quantity: req.quantity || 1,
     description: req.description,
     metadata: req.metadata ?? {},
+    grading_company: req.grading_company ?? null,
+    graded_score: req.graded_score ?? null,
   };
 
   if (req.pricecharting_id) {
@@ -439,8 +444,15 @@ function getCameraPage(): string {
 
     <!-- PriceCharting candidates -->
     <div class="card" id="pc-card" style="display:none">
-      <h2>PriceCharting Match</h2>
+      <h2>PriceCharting Match <span id="pc-count" style="font-size:12px;color:#888;font-weight:normal;"></span></h2>
+      <input id="pc-filter" type="text" placeholder="Filter candidates..."
+        style="width:100%;padding:8px;margin:6px 0;font-size:14px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
       <ul class="pc-list" id="pc-list"></ul>
+      <div id="pc-pager" style="display:none;justify-content:space-between;align-items:center;margin-top:8px;">
+        <button id="pc-prev" class="btn btn-secondary" style="flex:0 0 auto;padding:8px 14px;">Prev</button>
+        <span id="pc-page-info" style="font-size:12px;color:#aaa;"></span>
+        <button id="pc-next" class="btn btn-secondary" style="flex:0 0 auto;padding:8px 14px;">Next</button>
+      </div>
     </div>
 
     <div class="card">
@@ -469,6 +481,20 @@ function getCameraPage(): string {
           <option value="new_sealed">New / Sealed</option>
           <option value="graded">Graded</option>
         </select>
+      </div>
+      <div class="form-group" id="f-grading-row" style="display:none">
+        <label>Grading</label>
+        <div style="display:flex;gap:6px;">
+          <select id="f-grading-company" style="flex:1;padding:10px;font-size:16px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
+            <option value="">Grader...</option>
+            <option value="PSA">PSA</option>
+            <option value="BGS">BGS</option>
+            <option value="CGC">CGC</option>
+            <option value="SGC">SGC</option>
+          </select>
+          <input id="f-grade" type="number" step="0.5" inputmode="decimal" placeholder="Grade (e.g. 10)"
+            style="width:140px;padding:10px;font-size:16px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
+        </div>
       </div>
       <div class="form-group">
         <label>Quantity</label>
@@ -587,32 +613,12 @@ function getCameraPage(): string {
 
       if (data.pc_candidates && data.pc_candidates.length > 0) {
         pcCard.style.display = '';
-        data.pc_candidates.forEach((c, i) => {
-          const li = document.createElement('li');
-          const price = c.loose_price_cents || c.cib_price_cents || c.new_price_cents;
-          li.innerHTML = c.product_name + ' (' + c.console_name + ')<span class="pc-price">' + formatCents(price) + '</span>';
-          li.dataset.id = c.pricecharting_id;
-          li.dataset.price = price;
-
-          // Auto-select the matched one
-          if (data.pricecharting && c.pricecharting_id === data.pricecharting.pricecharting_id) {
-            li.classList.add('selected');
-            selectedPcId = c.pricecharting_id;
-            selectedPcPrice = price;
-          }
-
-          li.onclick = () => {
-            pcList.querySelectorAll('li').forEach(x => x.classList.remove('selected'));
-            li.classList.add('selected');
-            selectedPcId = c.pricecharting_id;
-            selectedPcPrice = parseInt(c.loose_price_cents || c.cib_price_cents || c.new_price_cents);
-            // Update suggested price
-            document.getElementById('suggested-price').textContent = formatCents(selectedPcPrice);
-            document.getElementById('f-price').value = (selectedPcPrice / 100).toFixed(2);
-          };
-
-          pcList.appendChild(li);
-        });
+        // Auto-select the matched candidate up front
+        if (data.pricecharting) {
+          selectedPcId = data.pricecharting.pricecharting_id;
+          selectedPcPrice = data.pricecharting.loose_price_cents || data.pricecharting.cib_price_cents || data.pricecharting.new_price_cents;
+        }
+        initPcPaging(data.pc_candidates);
       } else {
         pcCard.style.display = 'none';
       }
@@ -628,14 +634,89 @@ function getCameraPage(): string {
       document.getElementById('f-condition').value = mapCondition(id.details.condition_estimate);
       document.getElementById('f-qty').value = '1';
       document.getElementById('f-notes').value = '';
+      document.getElementById('f-grading-company').value = id.details.grading_company || '';
+      document.getElementById('f-grade').value = id.details.psa_grade || id.details.bgs_grade || id.details.cgc_grade || '';
+      toggleGradingRow();
       document.getElementById('success-msg').style.display = 'none';
     }
+
+    function toggleGradingRow() {
+      const cond = document.getElementById('f-condition').value;
+      document.getElementById('f-grading-row').style.display = cond === 'graded' ? '' : 'none';
+    }
+    document.getElementById('f-condition').onchange = toggleGradingRow;
 
     function mapCondition(estimate) {
       if (!estimate) return 'loose';
       const map = { 'mint': 'new_sealed', 'near mint': 'cib', 'lightly played': 'good', 'moderately played': 'good', 'heavily played': 'loose', 'damaged': 'loose' };
       return map[estimate.toLowerCase()] || 'loose';
     }
+
+    // PriceCharting candidate pagination
+    const PC_PER_PAGE = 5;
+    let pcAll = [];
+    let pcFiltered = [];
+    let pcPage = 0;
+
+    function initPcPaging(candidates) {
+      pcAll = candidates;
+      pcFiltered = candidates;
+      pcPage = 0;
+      document.getElementById('pc-filter').value = '';
+      document.getElementById('pc-count').textContent = '(' + candidates.length + ')';
+      renderPcPage();
+    }
+
+    function renderPcPage() {
+      const list = document.getElementById('pc-list');
+      const pager = document.getElementById('pc-pager');
+      const total = pcFiltered.length;
+      const pages = Math.max(1, Math.ceil(total / PC_PER_PAGE));
+      pcPage = Math.min(pcPage, pages - 1);
+      const start = pcPage * PC_PER_PAGE;
+      const slice = pcFiltered.slice(start, start + PC_PER_PAGE);
+
+      list.innerHTML = '';
+      slice.forEach(c => {
+        const li = document.createElement('li');
+        const price = c.loose_price_cents || c.cib_price_cents || c.new_price_cents;
+        li.innerHTML = c.product_name + ' (' + c.console_name + ')<span class="pc-price">' + formatCents(price) + '</span>';
+        li.dataset.id = c.pricecharting_id;
+        li.dataset.price = price;
+        if (c.pricecharting_id === selectedPcId) li.classList.add('selected');
+
+        li.onclick = () => {
+          document.querySelectorAll('#pc-list li').forEach(x => x.classList.remove('selected'));
+          li.classList.add('selected');
+          selectedPcId = c.pricecharting_id;
+          selectedPcPrice = parseInt(c.loose_price_cents || c.cib_price_cents || c.new_price_cents);
+          document.getElementById('suggested-price').textContent = formatCents(selectedPcPrice);
+          document.getElementById('f-price').value = selectedPcPrice > 0 ? (selectedPcPrice / 100).toFixed(2) : '';
+          document.getElementById('f-title').value = c.product_name;
+        };
+        list.appendChild(li);
+      });
+
+      if (total > PC_PER_PAGE) {
+        pager.style.display = 'flex';
+        document.getElementById('pc-page-info').textContent = 'Page ' + (pcPage + 1) + ' of ' + pages + ' (' + total + ')';
+        document.getElementById('pc-prev').disabled = pcPage === 0;
+        document.getElementById('pc-next').disabled = pcPage >= pages - 1;
+      } else {
+        pager.style.display = 'none';
+      }
+    }
+
+    document.getElementById('pc-prev').onclick = () => { if (pcPage > 0) { pcPage--; renderPcPage(); } };
+    document.getElementById('pc-next').onclick = () => { pcPage++; renderPcPage(); };
+    document.getElementById('pc-filter').oninput = (e) => {
+      const q = e.target.value.toLowerCase().trim();
+      pcFiltered = !q ? pcAll : pcAll.filter(c =>
+        (c.product_name + ' ' + c.console_name).toLowerCase().includes(q)
+      );
+      pcPage = 0;
+      renderPcPage();
+    };
 
     // Save / List buttons
     document.getElementById('save-btn').onclick = () => doSave(false);
@@ -656,12 +737,16 @@ function getCameraPage(): string {
       const btns = document.querySelectorAll('.btn');
       btns.forEach(b => b.disabled = true);
 
+      const condition = document.getElementById('f-condition').value;
+      const gradeStr = document.getElementById('f-grade').value;
+      const gradingCompany = document.getElementById('f-grading-company').value;
+
       try {
         const body = {
           file_path: currentFilePath,
           title: document.getElementById('f-title').value,
           category: currentResult.identification.category,
-          condition: document.getElementById('f-condition').value,
+          condition,
           price_cents: priceCents,
           status: 'in_stock',
           notes: document.getElementById('f-notes').value || undefined,
@@ -670,6 +755,8 @@ function getCameraPage(): string {
           market_price_cents: currentResult.suggested_market_price_cents || undefined,
           description: currentResult.identification.description,
           metadata: currentResult.identification.details,
+          grading_company: condition === 'graded' ? (gradingCompany || null) : null,
+          graded_score: condition === 'graded' && gradeStr ? parseFloat(gradeStr) : null,
           list_on_shopify: listOnShopify,
         };
 
@@ -1367,6 +1454,9 @@ function getInventoryPage(): string {
         </div>
         <input id="edit-notes" type="text" placeholder="Notes / purchase info"
           style="width:100%;padding:8px;font-size:14px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;margin-bottom:6px;">
+        <button class="snap-btn" id="modal-refresh-price"
+          style="background:#2563eb;margin-bottom:6px;">Get Latest PC Price</button>
+        <div id="pc-price-breakdown" style="display:none;font-size:12px;color:#aaa;margin-bottom:8px;padding:8px;background:#222;border-radius:6px;"></div>
         <button class="snap-btn" id="modal-save" style="background:#16a34a;">Save Changes</button>
       </div>
 
@@ -1495,12 +1585,64 @@ function getInventoryPage(): string {
       document.getElementById('modal-snap').textContent = existingImg ? 'Replace Photo' : 'Take Photo';
       document.getElementById('modal-save').textContent = 'Save Changes';
       document.getElementById('modal-save').disabled = false;
+      document.getElementById('pc-price-breakdown').style.display = 'none';
+
+      // Disable refresh if there's no PC id on this product
+      const refreshBtn = document.getElementById('modal-refresh-price');
+      if (product.pricecharting_id) {
+        refreshBtn.disabled = false;
+        refreshBtn.title = '';
+        refreshBtn.style.opacity = '1';
+      } else {
+        refreshBtn.disabled = true;
+        refreshBtn.title = 'No PriceCharting ID on this item';
+        refreshBtn.style.opacity = '0.5';
+      }
       document.getElementById('modal').classList.add('active');
     }
 
     // Show grading fields only when condition is graded
     document.getElementById('edit-condition').onchange = (e) => {
       document.getElementById('grading-row').style.display = e.target.value === 'graded' ? 'flex' : 'none';
+    };
+
+    document.getElementById('modal-refresh-price').onclick = async () => {
+      if (!selectedProductId) return;
+      const btn = document.getElementById('modal-refresh-price');
+      const breakdown = document.getElementById('pc-price-breakdown');
+      btn.textContent = 'Fetching from PriceCharting...';
+      btn.disabled = true;
+
+      try {
+        const resp = await fetch('/api/product/' + selectedProductId + '/refresh-price', { method: 'POST' });
+        const r = await resp.json();
+
+        if (r.error) {
+          breakdown.style.display = '';
+          breakdown.style.color = '#f87171';
+          breakdown.textContent = r.error;
+          return;
+        }
+
+        // Fill price field with the suggested price (matches condition)
+        if (r.suggested_cents > 0) {
+          document.getElementById('edit-price').value = (r.suggested_cents / 100).toFixed(2);
+        }
+
+        const fmt = c => c > 0 ? '$' + (c / 100).toFixed(2) : '-';
+        breakdown.style.color = '#aaa';
+        breakdown.innerHTML =
+          '<strong style="color:#4ade80;">Updated to ' + fmt(r.suggested_cents) + '</strong> (avg ' + fmt(r.average_cents) + ')<br>' +
+          'Loose: ' + fmt(r.loose_cents) + ' | CIB: ' + fmt(r.cib_cents) + ' | New: ' + fmt(r.new_cents) + ' | Graded: ' + fmt(r.graded_cents);
+        breakdown.style.display = '';
+      } catch (err) {
+        breakdown.style.display = '';
+        breakdown.style.color = '#f87171';
+        breakdown.textContent = 'Error: ' + err.message;
+      } finally {
+        btn.textContent = 'Get Latest PC Price';
+        btn.disabled = false;
+      }
     };
 
     document.getElementById('modal-save').onclick = async () => {
@@ -1943,6 +2085,78 @@ async function handleRequest(
         product_id: productId,
         image_url: urlData.publicUrl,
         is_primary: isPrimary,
+      });
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });
+    }
+    return;
+  }
+
+  // Refresh PriceCharting prices for a product
+  if (/^\/api\/product\/[^/]+\/refresh-price$/.test(url) && req.method === "POST") {
+    try {
+      const productId = decodeURIComponent(
+        url.slice("/api/product/".length, url.length - "/refresh-price".length)
+      );
+
+      const { data: product, error } = await supabase
+        .from("products")
+        .select("id, title, pricecharting_id, condition, current_price, market_price")
+        .eq("id", productId)
+        .single();
+
+      if (error || !product) {
+        sendJson(res, 404, { error: "Product not found" });
+        return;
+      }
+
+      if (!product.pricecharting_id) {
+        sendJson(res, 400, { error: "No pricecharting_id on this product" });
+        return;
+      }
+
+      const pc = await getProductById(product.pricecharting_id);
+      const loose = pc["loose-price"] ?? 0;
+      const cib = pc["cib-price"] ?? 0;
+      const neu = pc["new-price"] ?? 0;
+      const graded = pc["graded-price"] ?? 0;
+
+      // Prices that actually have data
+      const valid = [loose, cib, neu, graded].filter((p) => p > 0);
+      const average = valid.length > 0 ? Math.round(valid.reduce((a, b) => a + b, 0) / valid.length) : 0;
+
+      // Best match for this item's stored condition
+      const condMap: Record<string, number> = {
+        loose,
+        good: loose,
+        very_good: loose,
+        cib,
+        new_sealed: neu,
+        graded: graded || neu,
+      };
+      const suggested = (product.condition && condMap[product.condition]) || average;
+
+      // Record a price history entry for future reference
+      if (suggested > 0) {
+        await supabase.from("price_history").insert({
+          product_id: product.id,
+          source: "pricecharting",
+          price_cents: suggested,
+          condition: product.condition ?? null,
+          raw_data: { loose, cib, new: neu, graded, average },
+        });
+      }
+
+      console.log(`Refreshed PC price for ${product.title}: $${(suggested / 100).toFixed(2)} (avg $${(average / 100).toFixed(2)})`);
+
+      sendJson(res, 200, {
+        product_id: product.id,
+        loose_cents: loose,
+        cib_cents: cib,
+        new_cents: neu,
+        graded_cents: graded,
+        average_cents: average,
+        suggested_cents: suggested,
       });
     } catch (err) {
       sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });

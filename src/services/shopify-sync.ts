@@ -25,7 +25,9 @@ function buildTags(product: Product): string {
 
   const meta = product.metadata as Record<string, unknown>;
   if (meta.game) tags.push(String(meta.game));
-  if (meta.set) tags.push(String(meta.set));
+  if (product.set_name) tags.push(product.set_name);
+  else if (meta.set) tags.push(String(meta.set));
+  if (product.set_number) tags.push("#" + product.set_number);
   if (meta.platform) tags.push(String(meta.platform));
   if (meta.brand) tags.push(String(meta.brand));
   if (meta.rarity) tags.push(String(meta.rarity));

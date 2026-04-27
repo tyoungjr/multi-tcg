@@ -73,6 +73,9 @@ export interface PriceChartingMatch {
   cib_price_cents: number;
   new_price_cents: number;
   graded_price_cents?: number;
+  bgs_10_price_cents?: number;
+  condition_17_price_cents?: number;
+  condition_18_price_cents?: number;
 }
 
 // ---------------------------------------------------------------------------

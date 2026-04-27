@@ -164,6 +164,46 @@ export function getPriceForCondition(
   }
 }
 
+// Grade-aware price picker. For graded items, prefers the most specific tier
+// available (BGS 10, then aggregate graded, then condition-17/18) and never
+// falls back to loose — a graded card is fundamentally different inventory.
+export function pickPriceTier(
+  product: PriceChartingProduct,
+  condition: string | null | undefined,
+  gradingCompany?: string | null,
+  gradedScore?: number | null
+): number | null {
+  const loose = product["loose-price"] ?? 0;
+  const cib = product["cib-price"] ?? 0;
+  const neu = product["new-price"] ?? 0;
+  const graded = product["graded-price"] ?? 0;
+  const bgs10 = product["bgs-10-price"] ?? 0;
+  const cond17 = product["condition-17-price"] ?? 0;
+  const cond18 = product["condition-18-price"] ?? 0;
+
+  if (condition === "graded") {
+    const company = (gradingCompany ?? "").toUpperCase();
+    if (company === "BGS" && (gradedScore ?? 0) >= 10 && bgs10 > 0) return bgs10;
+    if (graded > 0) return graded;
+    if (cond18 > 0) return cond18;
+    if (cond17 > 0) return cond17;
+    if (bgs10 > 0) return bgs10;
+    return null;
+  }
+
+  switch (condition) {
+    case "cib":
+      return cib > 0 ? cib : loose > 0 ? loose : null;
+    case "new_sealed":
+      return neu > 0 ? neu : loose > 0 ? loose : null;
+    case "loose":
+    case "good":
+    case "very_good":
+    default:
+      return loose > 0 ? loose : null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Marketplace API - /api/offers (list offers)
 // ---------------------------------------------------------------------------

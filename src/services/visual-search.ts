@@ -104,6 +104,9 @@ function pcProductToMatch(product: PriceChartingProduct): PriceChartingMatch {
     cib_price_cents: product["cib-price"] ?? 0,
     new_price_cents: product["new-price"] ?? 0,
     graded_price_cents: product["graded-price"],
+    bgs_10_price_cents: product["bgs-10-price"],
+    condition_17_price_cents: product["condition-17-price"],
+    condition_18_price_cents: product["condition-18-price"],
   };
 }
 

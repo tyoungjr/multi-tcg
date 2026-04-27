@@ -13,7 +13,7 @@ import type { PriceChartingMatch } from "../types/visual-search";
 import type { Product, ProductInsert, ProductCategory, ProductCondition } from "../types/database";
 import { supabase } from "../lib/supabase";
 import { pushProductToShopify } from "../services/shopify-sync";
-import { getProductById } from "../lib/pricecharting";
+import { getProductById, pickPriceTier } from "../lib/pricecharting";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -179,6 +179,8 @@ interface SaveRequest {
   metadata?: Record<string, unknown>;
   grading_company?: string | null;
   graded_score?: number | null;
+  set_name?: string | null;
+  set_number?: string | null;
   list_on_shopify: boolean;
 }
 
@@ -200,6 +202,8 @@ async function saveAndList(req: SaveRequest): Promise<{
     metadata: req.metadata ?? {},
     grading_company: req.grading_company ?? null,
     graded_score: req.graded_score ?? null,
+    set_name: req.set_name ?? null,
+    set_number: req.set_number ?? null,
   };
 
   if (req.pricecharting_id) {
@@ -367,10 +371,30 @@ function getCameraPage(): string {
     .pc-list li {
       padding: 10px; margin: 4px 0; background: #222;
       border: 2px solid transparent; border-radius: 6px;
-      cursor: pointer; font-size: 13px;
+      cursor: pointer; font-size: 13px; position: relative;
     }
-    .pc-list li.selected { border-color: #2563eb; background: #1e293b; }
+    .pc-list li.selected {
+      border-color: #4ade80; background: #14532d;
+      box-shadow: 0 0 0 1px #4ade80 inset;
+    }
+    .pc-list li.selected::before {
+      content: '\\2713';
+      color: #4ade80; font-weight: 700;
+      margin-right: 6px;
+    }
     .pc-list li .pc-price { color: #4ade80; float: right; }
+    .pc-selected-badge {
+      background: #14532d; border: 1px solid #4ade80; border-radius: 6px;
+      padding: 8px 10px; margin: 6px 0; font-size: 13px;
+      display: flex; justify-content: space-between; gap: 8px;
+    }
+    .pc-selected-badge.empty {
+      background: #2a1f00; border-color: #f59e0b; color: #fbbf24;
+    }
+    .pc-selected-badge .label { color: #888; font-size: 11px; }
+    .pc-selected-badge .name { color: #eee; flex: 1; min-width: 0;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .pc-selected-badge .price { color: #4ade80; font-weight: 700; }
 
     /* Form */
     .form-group { margin: 8px 0; }
@@ -447,6 +471,11 @@ function getCameraPage(): string {
       <h2>PriceCharting Match <span id="pc-count" style="font-size:12px;color:#888;font-weight:normal;"></span></h2>
       <input id="pc-filter" type="text" placeholder="Filter candidates..."
         style="width:100%;padding:8px;margin:6px 0;font-size:14px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
+      <div id="pc-selected-badge" class="pc-selected-badge empty">
+        <span class="label">Selected:</span>
+        <span class="name" id="pc-selected-name">none - tap a result below</span>
+        <span class="price" id="pc-selected-price"></span>
+      </div>
       <ul class="pc-list" id="pc-list"></ul>
       <div id="pc-pager" style="display:none;justify-content:space-between;align-items:center;margin-top:8px;">
         <button id="pc-prev" class="btn btn-secondary" style="flex:0 0 auto;padding:8px 14px;">Prev</button>
@@ -494,6 +523,13 @@ function getCameraPage(): string {
           </select>
           <input id="f-grade" type="number" step="0.5" inputmode="decimal" placeholder="Grade (e.g. 10)"
             style="width:140px;padding:10px;font-size:16px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
+        </div>
+      </div>
+      <div class="form-group">
+        <label>Set</label>
+        <div style="display:flex;gap:6px;">
+          <input id="f-set-name" type="text" placeholder="Set name (e.g. Base Set)" style="flex:2;padding:10px;font-size:16px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
+          <input id="f-set-number" type="text" placeholder="#" style="flex:1;padding:10px;font-size:16px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
         </div>
       </div>
       <div class="form-group">
@@ -582,6 +618,31 @@ function getCameraPage(): string {
       return '$' + (cents / 100).toFixed(2);
     }
 
+    // Grade-aware candidate price picker. Mirrors pickPriceTier() in lib/pricecharting.ts.
+    function pickCandidatePrice(c, condition, gradingCompany, gradedScore) {
+      if (!c) return 0;
+      const loose = c.loose_price_cents || 0;
+      const cib = c.cib_price_cents || 0;
+      const neu = c.new_price_cents || 0;
+      const graded = c.graded_price_cents || 0;
+      const bgs10 = c.bgs_10_price_cents || 0;
+      const cond17 = c.condition_17_price_cents || 0;
+      const cond18 = c.condition_18_price_cents || 0;
+
+      if (condition === 'graded') {
+        const company = (gradingCompany || '').toUpperCase();
+        if (company === 'BGS' && (gradedScore || 0) >= 10 && bgs10 > 0) return bgs10;
+        if (graded > 0) return graded;
+        if (cond18 > 0) return cond18;
+        if (cond17 > 0) return cond17;
+        if (bgs10 > 0) return bgs10;
+        return 0;
+      }
+      if (condition === 'cib') return cib || loose || 0;
+      if (condition === 'new_sealed') return neu || loose || 0;
+      return loose || cib || neu || 0;
+    }
+
     function showResult(data) {
       const id = data.identification;
 
@@ -611,40 +672,70 @@ function getCameraPage(): string {
       selectedPcId = null;
       selectedPcPrice = null;
 
+      // Pre-fill form first so candidate price picker can read condition/grading
+      document.getElementById('f-title').value = id.title;
+      document.getElementById('f-condition').value = mapCondition(id.details.condition_estimate);
+      document.getElementById('f-qty').value = '1';
+      document.getElementById('f-notes').value = '';
+      document.getElementById('f-grading-company').value = id.details.grading_company || '';
+      document.getElementById('f-grade').value = id.details.psa_grade || id.details.bgs_grade || id.details.cgc_grade || '';
+      document.getElementById('f-set-name').value = id.details.set || '';
+      document.getElementById('f-set-number').value = id.details.card_number || '';
+      toggleGradingRow();
+
       if (data.pc_candidates && data.pc_candidates.length > 0) {
         pcCard.style.display = '';
         // Auto-select the matched candidate up front
         if (data.pricecharting) {
           selectedPcId = data.pricecharting.pricecharting_id;
-          selectedPcPrice = data.pricecharting.loose_price_cents || data.pricecharting.cib_price_cents || data.pricecharting.new_price_cents;
+          const fs = currentFormCondition();
+          selectedPcPrice = pickCandidatePrice(data.pricecharting, fs.condition, fs.gradingCompany, fs.gradedScore);
         }
         initPcPaging(data.pc_candidates);
       } else {
         pcCard.style.display = 'none';
       }
 
-      // Suggested price
-      const suggestedCents = data.suggested_market_price_cents || 0;
+      // Suggested price — prefer the grade-aware selection over the server's generic suggestion
+      const suggestedCents = selectedPcPrice || data.suggested_market_price_cents || 0;
       document.getElementById('suggested-price').textContent = formatCents(suggestedCents);
       document.getElementById('price-source').textContent = 'Source: ' + data.price_source;
-
-      // Pre-fill form
-      document.getElementById('f-title').value = id.title;
       document.getElementById('f-price').value = suggestedCents > 0 ? (suggestedCents / 100).toFixed(2) : '';
-      document.getElementById('f-condition').value = mapCondition(id.details.condition_estimate);
-      document.getElementById('f-qty').value = '1';
-      document.getElementById('f-notes').value = '';
-      document.getElementById('f-grading-company').value = id.details.grading_company || '';
-      document.getElementById('f-grade').value = id.details.psa_grade || id.details.bgs_grade || id.details.cgc_grade || '';
-      toggleGradingRow();
       document.getElementById('success-msg').style.display = 'none';
+    }
+
+    function currentFormCondition() {
+      return {
+        condition: document.getElementById('f-condition').value,
+        gradingCompany: document.getElementById('f-grading-company').value,
+        gradedScore: parseFloat(document.getElementById('f-grade').value) || null,
+      };
+    }
+
+    function recomputeSelectedPcPrice() {
+      if (!selectedPcId || !pcAll.length) return;
+      const cand = pcAll.find(c => c.pricecharting_id === selectedPcId);
+      if (!cand) return;
+      const fs = currentFormCondition();
+      const price = pickCandidatePrice(cand, fs.condition, fs.gradingCompany, fs.gradedScore);
+      selectedPcPrice = price;
+      document.getElementById('suggested-price').textContent = formatCents(price);
+      if (price > 0) document.getElementById('f-price').value = (price / 100).toFixed(2);
+      updatePcSelectedBadge();
     }
 
     function toggleGradingRow() {
       const cond = document.getElementById('f-condition').value;
       document.getElementById('f-grading-row').style.display = cond === 'graded' ? '' : 'none';
     }
-    document.getElementById('f-condition').onchange = toggleGradingRow;
+    function onConditionOrGradeChanged() {
+      toggleGradingRow();
+      renderPcPage();
+      recomputeSelectedPcPrice();
+    }
+    document.getElementById('f-condition').onchange = onConditionOrGradeChanged;
+    document.getElementById('f-grading-company').onchange = onConditionOrGradeChanged;
+    document.getElementById('f-grade').oninput = onConditionOrGradeChanged;
 
     function mapCondition(estimate) {
       if (!estimate) return 'loose';
@@ -661,10 +752,36 @@ function getCameraPage(): string {
     function initPcPaging(candidates) {
       pcAll = candidates;
       pcFiltered = candidates;
-      pcPage = 0;
+      // Start on the page containing the auto-selected candidate so the user can see it
+      const selIdx = selectedPcId ? candidates.findIndex(c => c.pricecharting_id === selectedPcId) : -1;
+      pcPage = selIdx >= 0 ? Math.floor(selIdx / PC_PER_PAGE) : 0;
       document.getElementById('pc-filter').value = '';
       document.getElementById('pc-count').textContent = '(' + candidates.length + ')';
       renderPcPage();
+      updatePcSelectedBadge();
+    }
+
+    function updatePcSelectedBadge() {
+      const badge = document.getElementById('pc-selected-badge');
+      const nameEl = document.getElementById('pc-selected-name');
+      const priceEl = document.getElementById('pc-selected-price');
+      if (!badge) return;
+      if (!selectedPcId) {
+        badge.classList.add('empty');
+        nameEl.textContent = 'none - tap a result below';
+        priceEl.textContent = '';
+        return;
+      }
+      const cand = pcAll.find(c => c.pricecharting_id === selectedPcId);
+      if (!cand) {
+        badge.classList.add('empty');
+        nameEl.textContent = 'none - tap a result below';
+        priceEl.textContent = '';
+        return;
+      }
+      badge.classList.remove('empty');
+      nameEl.textContent = cand.product_name + ' (' + cand.console_name + ')';
+      priceEl.textContent = formatCents(selectedPcPrice || 0);
     }
 
     function renderPcPage() {
@@ -676,10 +793,11 @@ function getCameraPage(): string {
       const start = pcPage * PC_PER_PAGE;
       const slice = pcFiltered.slice(start, start + PC_PER_PAGE);
 
+      const fs = currentFormCondition();
       list.innerHTML = '';
       slice.forEach(c => {
         const li = document.createElement('li');
-        const price = c.loose_price_cents || c.cib_price_cents || c.new_price_cents;
+        const price = pickCandidatePrice(c, fs.condition, fs.gradingCompany, fs.gradedScore);
         li.innerHTML = c.product_name + ' (' + c.console_name + ')<span class="pc-price">' + formatCents(price) + '</span>';
         li.dataset.id = c.pricecharting_id;
         li.dataset.price = price;
@@ -689,10 +807,12 @@ function getCameraPage(): string {
           document.querySelectorAll('#pc-list li').forEach(x => x.classList.remove('selected'));
           li.classList.add('selected');
           selectedPcId = c.pricecharting_id;
-          selectedPcPrice = parseInt(c.loose_price_cents || c.cib_price_cents || c.new_price_cents);
+          const fs2 = currentFormCondition();
+          selectedPcPrice = pickCandidatePrice(c, fs2.condition, fs2.gradingCompany, fs2.gradedScore);
           document.getElementById('suggested-price').textContent = formatCents(selectedPcPrice);
           document.getElementById('f-price').value = selectedPcPrice > 0 ? (selectedPcPrice / 100).toFixed(2) : '';
           document.getElementById('f-title').value = c.product_name;
+          updatePcSelectedBadge();
         };
         list.appendChild(li);
       });
@@ -757,6 +877,8 @@ function getCameraPage(): string {
           metadata: currentResult.identification.details,
           grading_company: condition === 'graded' ? (gradingCompany || null) : null,
           graded_score: condition === 'graded' && gradeStr ? parseFloat(gradeStr) : null,
+          set_name: document.getElementById('f-set-name').value.trim() || null,
+          set_number: document.getElementById('f-set-number').value.trim() || null,
           list_on_shopify: listOnShopify,
         };
 
@@ -904,7 +1026,11 @@ function getBatchPage(): string {
       border-radius: 5px; cursor: pointer; font-size: 12px; color: #ccc;
       display: flex; justify-content: space-between; align-items: center;
     }
-    .pc-item.selected { border-color: #2563eb; background: #1e293b; color: #fff; }
+    .pc-item.selected {
+      border-color: #4ade80; background: #14532d; color: #fff;
+      box-shadow: 0 0 0 1px #4ade80 inset;
+    }
+    .pc-item.selected::before { content: '\\2713 '; color: #4ade80; font-weight: 700; margin-right: 4px; }
     .pc-price { color: #4ade80; margin-left: 8px; flex-shrink: 0; }
 
     /* Bottom bar */
@@ -1003,6 +1129,30 @@ function getBatchPage(): string {
       if (!c || c <= 0) return '-';
       return '$' + (c / 100).toFixed(2);
     }
+    // Grade-aware candidate price picker. Mirrors pickPriceTier() in lib/pricecharting.ts.
+    function pickCandidatePrice(c, condition, gradingCompany, gradedScore) {
+      if (!c) return 0;
+      const loose = c.loose_price_cents || 0;
+      const cib = c.cib_price_cents || 0;
+      const neu = c.new_price_cents || 0;
+      const graded = c.graded_price_cents || 0;
+      const bgs10 = c.bgs_10_price_cents || 0;
+      const cond17 = c.condition_17_price_cents || 0;
+      const cond18 = c.condition_18_price_cents || 0;
+
+      if (condition === 'graded') {
+        const company = (gradingCompany || '').toUpperCase();
+        if (company === 'BGS' && (gradedScore || 0) >= 10 && bgs10 > 0) return bgs10;
+        if (graded > 0) return graded;
+        if (cond18 > 0) return cond18;
+        if (cond17 > 0) return cond17;
+        if (bgs10 > 0) return bgs10;
+        return 0;
+      }
+      if (condition === 'cib') return cib || loose || 0;
+      if (condition === 'new_sealed') return neu || loose || 0;
+      return loose || cib || neu || 0;
+    }
     function mapCond(est) {
       if (!est) return 'loose';
       const m = { 'mint':'new_sealed','near mint':'cib','lightly played':'good','moderately played':'good','heavily played':'loose','damaged':'loose' };
@@ -1041,19 +1191,17 @@ function getBatchPage(): string {
       const id = job.result.identification;
       const pc = job.result.pricecharting;
       const candidates = job.result.pc_candidates || [];
-      const price = job.result.suggested_market_price_cents || 0;
       const condVal = mapCond(id.details ? id.details.condition_estimate : null);
+      // Prefer grade-aware pick on the auto-matched candidate over the server's generic suggestion
+      const gradeAwarePrice = pc ? pickCandidatePrice(pc, condVal) : 0;
+      const price = gradeAwarePrice || job.result.suggested_market_price_cents || 0;
       const thumb = '/api/preview/' + encodeURIComponent(job.file_path);
 
+      const initialSelectedId = pc ? pc.pricecharting_id : '';
       let pcHtml = '';
       if (candidates.length > 0) {
         pcHtml = '<div class="pc-label">PriceCharting match - tap to change:</div><div class="pc-candidates" id="pcc-' + job.id + '">' +
-          '<div class="pc-item" data-id="" data-price="0" onclick="selectPc(this,\\'' + job.id + '\\')"><span style="color:#888">None - use manual title</span><span class="pc-price">-</span></div>' +
-          candidates.map(c => {
-            const p = c.loose_price_cents || c.cib_price_cents || c.new_price_cents || 0;
-            const sel = pc && c.pricecharting_id === pc.pricecharting_id ? ' selected' : '';
-            return '<div class="pc-item' + sel + '" data-id="' + escHtml(c.pricecharting_id) + '" data-price="' + p + '" onclick="selectPc(this,\\'' + job.id + '\\')"><span>' + escHtml(c.product_name) + ' (' + escHtml(c.console_name) + ')</span><span class="pc-price">' + formatCents(p) + '</span></div>';
-          }).join('') +
+          buildPcCandidatesHtml(job.id, candidates, initialSelectedId, condVal) +
         '</div>';
       }
 
@@ -1065,7 +1213,7 @@ function getBatchPage(): string {
               '<input id="title-' + job.id + '" type="text" value="' + escHtml(id.title) + '">' +
               '<div class="price-row">' +
                 '<input id="price-' + job.id + '" type="number" step="0.01" inputmode="decimal" placeholder="Price $" value="' + (price > 0 ? (price / 100).toFixed(2) : '') + '">' +
-                '<select id="cond-' + job.id + '">' +
+                '<select id="cond-' + job.id + '" onchange="onJobConditionChanged(\\'' + job.id + '\\')">' +
                   '<option value="loose" ' + selOpt(condVal,'loose') + '>Loose</option>' +
                   '<option value="good" ' + selOpt(condVal,'good') + '>Good</option>' +
                   '<option value="very_good" ' + selOpt(condVal,'very_good') + '>Very Good</option>' +
@@ -1081,11 +1229,54 @@ function getBatchPage(): string {
         '</div>';
     }
 
+    function buildPcCandidatesHtml(jobId, candidates, selectedId, condition) {
+      const noneSel = selectedId === '' ? ' selected' : '';
+      let html = '<div class="pc-item' + noneSel + '" data-id="" data-price="0" onclick="selectPc(this,\\'' + jobId + '\\')"><span style="color:#888">None - use manual title</span><span class="pc-price">-</span></div>';
+      html += candidates.map(c => {
+        const p = pickCandidatePrice(c, condition);
+        const sel = c.pricecharting_id === selectedId ? ' selected' : '';
+        return '<div class="pc-item' + sel + '" data-id="' + escHtml(c.pricecharting_id) + '" data-price="' + p + '" onclick="selectPc(this,\\'' + jobId + '\\')"><span>' + escHtml(c.product_name) + ' (' + escHtml(c.console_name) + ')</span><span class="pc-price">' + formatCents(p) + '</span></div>';
+      }).join('');
+      return html;
+    }
+
+    function onJobConditionChanged(jobId) {
+      const job = jobData[jobId];
+      if (!job || !job.result) return;
+      const candidates = job.result.pc_candidates || [];
+      if (!candidates.length) return;
+      const condEl = document.getElementById('cond-' + jobId);
+      const condition = condEl ? condEl.value : 'loose';
+      const container = document.getElementById('pcc-' + jobId);
+      if (!container) return;
+      const currentSel = container.querySelector('.pc-item.selected');
+      const selectedId = currentSel ? (currentSel.dataset.id || '') : '';
+      container.innerHTML = buildPcCandidatesHtml(jobId, candidates, selectedId, condition);
+      // Update the price input to match the now-recomputed price for the selected candidate
+      if (selectedId) {
+        const c = candidates.find(x => x.pricecharting_id === selectedId);
+        if (c) {
+          const newPrice = pickCandidatePrice(c, condition);
+          if (newPrice > 0) {
+            document.getElementById('price-' + jobId).value = (newPrice / 100).toFixed(2);
+          }
+        }
+      }
+    }
+
     function selectPc(el, jobId) {
       const container = document.getElementById('pcc-' + jobId);
       container.querySelectorAll('.pc-item').forEach(x => x.classList.remove('selected'));
       el.classList.add('selected');
-      const price = parseInt(el.dataset.price) || 0;
+      const candId = el.dataset.id || '';
+      const condEl = document.getElementById('cond-' + jobId);
+      const condition = condEl ? condEl.value : 'loose';
+      // Recompute price from the candidate object so it tracks current condition
+      let price = 0;
+      if (candId && jobData[jobId] && jobData[jobId].result) {
+        const cand = (jobData[jobId].result.pc_candidates || []).find(c => c.pricecharting_id === candId);
+        if (cand) price = pickCandidatePrice(cand, condition);
+      }
       const priceEl = document.getElementById('price-' + jobId);
       const titleEl = document.getElementById('title-' + jobId);
       if (price > 0) {
@@ -1093,7 +1284,7 @@ function getBatchPage(): string {
       }
       // Update title to match selected candidate (grab text before the price span)
       const nameSpan = el.querySelector('span');
-      if (nameSpan && el.dataset.id) {
+      if (nameSpan && candId) {
         titleEl.value = nameSpan.textContent;
       }
     }
@@ -1452,6 +1643,12 @@ function getInventoryPage(): string {
           <input id="edit-grade" type="number" step="0.5" inputmode="decimal" placeholder="Grade"
             style="width:90px;padding:8px;font-size:14px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
         </div>
+        <div style="display:flex;gap:6px;margin-bottom:6px;">
+          <input id="edit-set-name" type="text" placeholder="Set name"
+            style="flex:2;padding:8px;font-size:14px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
+          <input id="edit-set-number" type="text" placeholder="Card #"
+            style="flex:1;padding:8px;font-size:14px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
+        </div>
         <input id="edit-notes" type="text" placeholder="Notes / purchase info"
           style="width:100%;padding:8px;font-size:14px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;margin-bottom:6px;">
         <button class="snap-btn" id="modal-refresh-price"
@@ -1523,7 +1720,7 @@ function getInventoryPage(): string {
           '</div>' +
           '<div class="item-info">' +
             '<div class="item-title">' + escHtml(p.title) + '</div>' +
-            '<div class="item-meta">' + p.category.replace('_', ' ') + (p.condition ? ' | ' + p.condition.replace('_', ' ') : '') + '</div>' +
+            '<div class="item-meta">' + p.category.replace('_', ' ') + (p.condition ? ' | ' + p.condition.replace('_', ' ') : '') + ((p.set_name || p.set_number) ? ' | ' + escHtml([p.set_name, p.set_number ? '#' + p.set_number : ''].filter(Boolean).join(' ')) : '') + '</div>' +
             (price ? '<div class="item-price">$' + (price / 100).toFixed(2) + '</div>' : '') +
             (!hasPhoto ? '<div class="item-nophoto">No photo</div>' : '') +
           '</div>';
@@ -1577,6 +1774,8 @@ function getInventoryPage(): string {
       document.getElementById('edit-notes').value = product.purchase_notes ?? '';
       document.getElementById('edit-grading-company').value = product.grading_company ?? '';
       document.getElementById('edit-grade').value = product.graded_score ?? '';
+      document.getElementById('edit-set-name').value = product.set_name ?? '';
+      document.getElementById('edit-set-number').value = product.set_number ?? '';
 
       const gradingRow = document.getElementById('grading-row');
       gradingRow.style.display = product.condition === 'graded' ? 'flex' : 'none';
@@ -1614,7 +1813,18 @@ function getInventoryPage(): string {
       btn.disabled = true;
 
       try {
-        const resp = await fetch('/api/product/' + selectedProductId + '/refresh-price', { method: 'POST' });
+        const condition = document.getElementById('edit-condition').value;
+        const gradeStr = document.getElementById('edit-grade').value;
+        const overrides = {
+          condition: condition || null,
+          grading_company: condition === 'graded' ? (document.getElementById('edit-grading-company').value || null) : null,
+          graded_score: condition === 'graded' && gradeStr ? parseFloat(gradeStr) : null,
+        };
+        const resp = await fetch('/api/product/' + selectedProductId + '/refresh-price', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(overrides),
+        });
         const r = await resp.json();
 
         if (r.error) {
@@ -1624,16 +1834,21 @@ function getInventoryPage(): string {
           return;
         }
 
-        // Fill price field with the suggested price (matches condition)
+        // Fill price field with the suggested price (matches condition + grade)
         if (r.suggested_cents > 0) {
           document.getElementById('edit-price').value = (r.suggested_cents / 100).toFixed(2);
         }
 
         const fmt = c => c > 0 ? '$' + (c / 100).toFixed(2) : '-';
+        const gradedTiers = [];
+        if (r.bgs_10_cents > 0) gradedTiers.push('BGS10: ' + fmt(r.bgs_10_cents));
+        if (r.condition_17_cents > 0) gradedTiers.push('C17: ' + fmt(r.condition_17_cents));
+        if (r.condition_18_cents > 0) gradedTiers.push('C18: ' + fmt(r.condition_18_cents));
         breakdown.style.color = '#aaa';
         breakdown.innerHTML =
           '<strong style="color:#4ade80;">Updated to ' + fmt(r.suggested_cents) + '</strong> (avg ' + fmt(r.average_cents) + ')<br>' +
-          'Loose: ' + fmt(r.loose_cents) + ' | CIB: ' + fmt(r.cib_cents) + ' | New: ' + fmt(r.new_cents) + ' | Graded: ' + fmt(r.graded_cents);
+          'Loose: ' + fmt(r.loose_cents) + ' | CIB: ' + fmt(r.cib_cents) + ' | New: ' + fmt(r.new_cents) + ' | Graded: ' + fmt(r.graded_cents) +
+          (gradedTiers.length ? '<br>' + gradedTiers.join(' | ') : '');
         breakdown.style.display = '';
       } catch (err) {
         breakdown.style.display = '';
@@ -1665,6 +1880,8 @@ function getInventoryPage(): string {
         purchase_notes: document.getElementById('edit-notes').value || null,
         grading_company: condition === 'graded' ? (document.getElementById('edit-grading-company').value || null) : null,
         graded_score: condition === 'graded' && gradeStr ? parseFloat(gradeStr) : null,
+        set_name: document.getElementById('edit-set-name').value.trim() || null,
+        set_number: document.getElementById('edit-set-number').value.trim() || null,
       };
 
       try {
@@ -1948,7 +2165,7 @@ async function handleRequest(
 
       let query = supabase
         .from("products")
-        .select("id, title, category, condition, inventory_status, current_price, market_price, quantity, metadata, pricecharting_id, purchase_notes, grading_company, graded_score", { count: "exact" });
+        .select("id, title, category, condition, inventory_status, current_price, market_price, quantity, metadata, pricecharting_id, purchase_notes, grading_company, graded_score, set_name, set_number", { count: "exact" });
 
       if (search) {
         query = query.ilike("title", `%${search}%`);
@@ -2101,7 +2318,7 @@ async function handleRequest(
 
       const { data: product, error } = await supabase
         .from("products")
-        .select("id, title, pricecharting_id, condition, current_price, market_price")
+        .select("id, title, pricecharting_id, condition, current_price, market_price, grading_company, graded_score")
         .eq("id", productId)
         .single();
 
@@ -2115,39 +2332,54 @@ async function handleRequest(
         return;
       }
 
+      // Allow client to override condition/grading from in-progress modal edits
+      // so refresh reflects what the user is about to save, not the stale DB row.
+      let overrides: Record<string, unknown> = {};
+      try {
+        const raw = await readBody(req);
+        if (raw.length > 0) overrides = JSON.parse(raw.toString());
+      } catch {
+        // Empty or non-JSON body is fine — fall through to stored values
+      }
+      const effectiveCondition = (overrides.condition as string | undefined) ?? product.condition ?? null;
+      const effectiveGradingCompany =
+        (overrides.grading_company as string | undefined) ?? product.grading_company ?? null;
+      const effectiveGradedScore =
+        (overrides.graded_score as number | undefined) ?? product.graded_score ?? null;
+
       const pc = await getProductById(product.pricecharting_id);
       const loose = pc["loose-price"] ?? 0;
       const cib = pc["cib-price"] ?? 0;
       const neu = pc["new-price"] ?? 0;
       const graded = pc["graded-price"] ?? 0;
+      const bgs10 = pc["bgs-10-price"] ?? 0;
+      const cond17 = pc["condition-17-price"] ?? 0;
+      const cond18 = pc["condition-18-price"] ?? 0;
 
-      // Prices that actually have data
-      const valid = [loose, cib, neu, graded].filter((p) => p > 0);
+      // Average across all populated tiers (used as last-resort fallback)
+      const valid = [loose, cib, neu, graded, bgs10, cond17, cond18].filter((p) => p > 0);
       const average = valid.length > 0 ? Math.round(valid.reduce((a, b) => a + b, 0) / valid.length) : 0;
 
-      // Best match for this item's stored condition
-      const condMap: Record<string, number> = {
-        loose,
-        good: loose,
-        very_good: loose,
-        cib,
-        new_sealed: neu,
-        graded: graded || neu,
-      };
-      const suggested = (product.condition && condMap[product.condition]) || average;
+      const tier = pickPriceTier(pc, effectiveCondition, effectiveGradingCompany, effectiveGradedScore);
+      const suggested = tier ?? average;
 
-      // Record a price history entry for future reference
       if (suggested > 0) {
         await supabase.from("price_history").insert({
           product_id: product.id,
           source: "pricecharting",
           price_cents: suggested,
-          condition: product.condition ?? null,
-          raw_data: { loose, cib, new: neu, graded, average },
+          condition: effectiveCondition,
+          raw_data: {
+            loose, cib, new: neu, graded,
+            bgs10, cond17, cond18,
+            average,
+            grading_company: effectiveGradingCompany,
+            graded_score: effectiveGradedScore,
+          },
         });
       }
 
-      console.log(`Refreshed PC price for ${product.title}: $${(suggested / 100).toFixed(2)} (avg $${(average / 100).toFixed(2)})`);
+      console.log(`Refreshed PC price for ${product.title} [${effectiveCondition ?? 'no-cond'}${effectiveGradingCompany ? ' ' + effectiveGradingCompany + ' ' + (effectiveGradedScore ?? '') : ''}]: $${(suggested / 100).toFixed(2)} (avg $${(average / 100).toFixed(2)})`);
 
       sendJson(res, 200, {
         product_id: product.id,
@@ -2155,8 +2387,12 @@ async function handleRequest(
         cib_cents: cib,
         new_cents: neu,
         graded_cents: graded,
+        bgs_10_cents: bgs10,
+        condition_17_cents: cond17,
+        condition_18_cents: cond18,
         average_cents: average,
         suggested_cents: suggested,
+        condition: effectiveCondition,
       });
     } catch (err) {
       sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });
@@ -2184,6 +2420,8 @@ async function handleRequest(
         "description",
         "title",
         "metadata",
+        "set_name",
+        "set_number",
       ];
       const update: Record<string, unknown> = {};
       for (const key of allowed) {

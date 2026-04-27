@@ -59,6 +59,8 @@ export interface Product {
   metadata: Record<string, unknown>;
   quantity: number;
   shopify_synced_at: string | null;
+  set_name: string | null;
+  set_number: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -85,6 +87,8 @@ export interface ProductInsert {
   market_price?: number | null;
   metadata?: Record<string, unknown>;
   quantity?: number;
+  set_name?: string | null;
+  set_number?: string | null;
 }
 
 export interface PriceHistory {

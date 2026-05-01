@@ -130,3 +130,102 @@ export interface ProductImageInsert {
   alt_text?: string | null;
   visual_search_result?: Record<string, unknown> | null;
 }
+
+// ---------------------------------------------------------------------------
+// Bundles (decks, lots, multi-item bundles)
+// ---------------------------------------------------------------------------
+
+export type BundleKind = "deck" | "bundle" | "lot";
+export type BundleGame =
+  | "yugioh"
+  | "pokemon"
+  | "mtg"
+  | "onepiece"
+  | "digimon"
+  | "sports"
+  | "other";
+
+export type BundleItemSection = "main" | "extra" | "side";
+export type BundleItemPriceSource =
+  | "self"
+  | "pricecharting"
+  | "ebay_sold"
+  | "ygoprodeck"
+  | "manual";
+
+export interface Bundle {
+  id: string;
+  title: string;
+  kind: BundleKind;
+  game: BundleGame | null;
+  format: string | null;
+  description: string | null;
+  source: string | null;
+  source_url: string | null;
+  pilot: string | null;
+  total_items: number;
+  in_stock_items: number;
+  in_stock_total_cents: number;
+  missing_total_cents: number;
+  shopify_product_id: string | null;
+  shopify_variant_id: string | null;
+  shopify_synced_at: string | null;
+  ebay_listing_id: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BundleInsert {
+  title: string;
+  kind?: BundleKind;
+  game?: BundleGame | null;
+  format?: string | null;
+  description?: string | null;
+  source?: string | null;
+  source_url?: string | null;
+  pilot?: string | null;
+  total_items?: number;
+  in_stock_items?: number;
+  in_stock_total_cents?: number;
+  missing_total_cents?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface BundleItem {
+  id: string;
+  bundle_id: string;
+  product_id: string | null;
+  pricecharting_id: string | null;
+  konami_id: string | null;
+  card_name: string;
+  set_name: string | null;
+  set_number: string | null;
+  image_url: string | null;
+  quantity: number;
+  position: number | null;
+  section: BundleItemSection | string | null;
+  unit_price_cents: number | null;
+  price_source: BundleItemPriceSource | string | null;
+  price_updated_at: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface BundleItemInsert {
+  bundle_id: string;
+  product_id?: string | null;
+  pricecharting_id?: string | null;
+  konami_id?: string | null;
+  card_name: string;
+  set_name?: string | null;
+  set_number?: string | null;
+  image_url?: string | null;
+  quantity?: number;
+  position?: number | null;
+  section?: BundleItemSection | string | null;
+  unit_price_cents?: number | null;
+  price_source?: BundleItemPriceSource | string | null;
+  price_updated_at?: string | null;
+  metadata?: Record<string, unknown>;
+}

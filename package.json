@@ -17,7 +17,9 @@
     "shopify:auth": "tsx src/scripts/shopify-auth.ts",
     "shopify:push": "tsx src/scripts/shopify-push.ts",
     "shopify:orders": "tsx src/scripts/shopify-orders.ts",
-    "snap": "tsx src/scripts/snap-server.ts"
+    "snap": "tsx src/scripts/snap-server.ts",
+    "deck:inspect": "tsx src/scripts/inspect-ydk.ts",
+    "deck:import": "tsx src/scripts/import-deck.ts"
   },
   "keywords": [],
   "author": "",

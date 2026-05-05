@@ -10,7 +10,8 @@ import {
 } from "../services/visual-search";
 import type { SearchOptions } from "../services/visual-search";
 import type { PriceChartingMatch } from "../types/visual-search";
-import type { Product, ProductInsert, ProductCategory, ProductCondition } from "../types/database";
+import type { Product, ProductInsert, ProductCategory, ProductCondition, BundleKind, BundleGame } from "../types/database";
+import { previewBundleFromYdk, createBundleFromYdk, recomputeBundle } from "../services/bundle-service";
 import { supabase } from "../lib/supabase";
 import { pushProductToShopify } from "../services/shopify-sync";
 import { getProductById, pickPriceTier } from "../lib/pricecharting";
@@ -440,6 +441,7 @@ function getCameraPage(): string {
     <h1 style="flex:1">Snap & Sell</h1>
     <a href="/inventory" style="color:#60a5fa;font-size:13px;text-decoration:none;padding:6px 12px;background:#222;border-radius:4px;">Inventory</a>
     <a href="/batch" style="color:#60a5fa;font-size:13px;text-decoration:none;padding:6px 12px;background:#222;border-radius:4px;">Batch</a>
+    <a href="/bundles" style="color:#60a5fa;font-size:13px;text-decoration:none;padding:6px 12px;background:#222;border-radius:4px;">Bundles</a>
   </div>
 
   <!-- Screen 1: Capture -->
@@ -1062,6 +1064,7 @@ function getBatchPage(): string {
       <a href="/">Snap</a>
       <a href="/inventory">Inventory</a>
       <a href="/batch" class="active">Batch <span id="proc-badge" class="badge" style="display:none"></span></a>
+      <a href="/bundles">Bundles</a>
     </div>
     <div class="snap-row">
       <button class="snap-btn-sm" id="snap-btn">SNAP</button>
@@ -1566,6 +1569,8 @@ function getInventoryPage(): string {
     <div class="header-nav">
       <a href="/">Snap New</a>
       <a href="/inventory" class="active">Inventory</a>
+      <a href="/batch">Batch</a>
+      <a href="/bundles">Bundles</a>
     </div>
     <h1>Inventory</h1>
     <div class="search-row">
@@ -2494,6 +2499,179 @@ async function handleRequest(
     return;
   }
 
+  // Bundles browse page
+  if (url === "/bundles" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(getBundlesPage());
+    return;
+  }
+
+  // List bundles (paginated)
+  if (url.startsWith("/api/bundles") && url !== "/api/bundles/preview" && req.method === "GET") {
+    try {
+      const params = new URL(url, `http://localhost:${PORT}`).searchParams;
+      const game = params.get("game") ?? "";
+      const kind = params.get("kind") ?? "";
+      const page = parseInt(params.get("page") ?? "1", 10);
+      const limit = 30;
+      const offset = (page - 1) * limit;
+
+      let query = supabase
+        .from("bundles")
+        .select(
+          "id, title, kind, game, format, source, pilot, total_items, in_stock_items, in_stock_total_cents, missing_total_cents, updated_at",
+          { count: "exact" }
+        );
+
+      if (game) query = query.eq("game", game);
+      if (kind) query = query.eq("kind", kind);
+
+      query = query.order("updated_at", { ascending: false }).range(offset, offset + limit - 1);
+
+      const { data: bundles, count, error } = await query;
+      if (error) {
+        sendJson(res, 500, { error: error.message });
+        return;
+      }
+      sendJson(res, 200, { bundles: bundles ?? [], total: count ?? 0, page });
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });
+    }
+    return;
+  }
+
+  // Preview a bundle from pasted .ydk / ydke:// (no DB writes)
+  if (url === "/api/bundles/preview" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body.toString()) as { deck_text?: string };
+      if (!payload.deck_text || !payload.deck_text.trim()) {
+        sendJson(res, 400, { error: "deck_text is required" });
+        return;
+      }
+      const preview = await previewBundleFromYdk(payload.deck_text);
+      sendJson(res, 200, preview);
+    } catch (err) {
+      sendJson(res, 400, { error: err instanceof Error ? err.message : "Unknown error" });
+    }
+    return;
+  }
+
+  // Create a bundle from pasted .ydk / ydke:// + title/options
+  if (url === "/api/bundles" && req.method === "POST") {
+    try {
+      const body = await readBody(req);
+      const payload = JSON.parse(body.toString()) as {
+        deck_text?: string;
+        title?: string;
+        kind?: BundleKind;
+        game?: BundleGame;
+        format?: string | null;
+        source?: string | null;
+        source_url?: string | null;
+        pilot?: string | null;
+        description?: string | null;
+      };
+      if (!payload.deck_text || !payload.deck_text.trim()) {
+        sendJson(res, 400, { error: "deck_text is required" });
+        return;
+      }
+      if (!payload.title || !payload.title.trim()) {
+        sendJson(res, 400, { error: "title is required" });
+        return;
+      }
+      const result = await createBundleFromYdk(payload.deck_text, {
+        title: payload.title.trim(),
+        kind: payload.kind ?? "deck",
+        game: payload.game ?? "yugioh",
+        format: payload.format ?? null,
+        source: payload.source ?? null,
+        source_url: payload.source_url ?? null,
+        pilot: payload.pilot ?? null,
+        description: payload.description ?? null,
+      });
+      console.log(`Created bundle ${result.bundle_id}: ${payload.title}`);
+      sendJson(res, 200, {
+        bundle_id: result.bundle_id,
+        summary: result.preview.summary,
+      });
+    } catch (err) {
+      sendJson(res, 400, { error: err instanceof Error ? err.message : "Unknown error" });
+    }
+    return;
+  }
+
+  // Bundle detail page
+  if (/^\/bundles\/[^/]+$/.test(url) && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(getBundleDetailPage());
+    return;
+  }
+
+  // Get a single bundle + its items (grouped by section)
+  if (/^\/api\/bundles\/[^/]+$/.test(url) && req.method === "GET") {
+    try {
+      const bundleId = decodeURIComponent(url.slice("/api/bundles/".length));
+
+      const { data: bundle, error: bundleErr } = await supabase
+        .from("bundles")
+        .select("*")
+        .eq("id", bundleId)
+        .single();
+      if (bundleErr || !bundle) {
+        sendJson(res, 404, { error: "Bundle not found" });
+        return;
+      }
+
+      const { data: items, error: itemsErr } = await supabase
+        .from("bundle_items")
+        .select("id, bundle_id, product_id, konami_id, card_name, set_name, set_number, image_url, quantity, position, section, unit_price_cents, price_source, price_updated_at")
+        .eq("bundle_id", bundleId)
+        .order("position", { ascending: true });
+      if (itemsErr) {
+        sendJson(res, 500, { error: itemsErr.message });
+        return;
+      }
+
+      sendJson(res, 200, { bundle, items: items ?? [] });
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });
+    }
+    return;
+  }
+
+  // Refresh prices for an existing bundle
+  if (/^\/api\/bundles\/[^/]+\/refresh-prices$/.test(url) && req.method === "POST") {
+    try {
+      const bundleId = decodeURIComponent(
+        url.slice("/api/bundles/".length, url.length - "/refresh-prices".length)
+      );
+      const result = await recomputeBundle(bundleId);
+      console.log(`Refreshed bundle ${bundleId}: in-stock $${(result.summary.in_stock_total_cents / 100).toFixed(2)}, need $${(result.summary.missing_total_cents / 100).toFixed(2)}`);
+      sendJson(res, 200, result);
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });
+    }
+    return;
+  }
+
+  // Delete a bundle (cascades to bundle_items via FK)
+  if (/^\/api\/bundles\/[^/]+$/.test(url) && req.method === "DELETE") {
+    try {
+      const bundleId = decodeURIComponent(url.slice("/api/bundles/".length));
+      const { error } = await supabase.from("bundles").delete().eq("id", bundleId);
+      if (error) {
+        sendJson(res, 500, { error: error.message });
+        return;
+      }
+      console.log(`Deleted bundle: ${bundleId}`);
+      sendJson(res, 200, { deleted: true, bundle_id: bundleId });
+    } catch (err) {
+      sendJson(res, 500, { error: err instanceof Error ? err.message : "Unknown error" });
+    }
+    return;
+  }
+
   // Batch queue page
   if (url === "/batch" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "text/html" });
@@ -2608,6 +2786,591 @@ async function handleRequest(
 
   res.writeHead(404);
   res.end("Not found");
+}
+
+function getBundlesPage(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Bundles - Snap & Sell</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, system-ui, sans-serif; background: #111; color: #eee; min-height: 100dvh; }
+    .header { padding: 12px 16px; background: #1a1a1a; border-bottom: 1px solid #333; position: sticky; top: 0; z-index: 10; }
+    .header h1 { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+    .header-nav { display: flex; gap: 8px; margin-bottom: 8px; }
+    .header-nav a { color: #60a5fa; text-decoration: none; font-size: 13px; padding: 6px 12px; background: #222; border-radius: 4px; }
+    .header-nav a.active { background: #2563eb; color: white; }
+    .toolbar { display: flex; gap: 8px; padding: 12px 16px; align-items: center; }
+    .toolbar select { background: #222; color: #eee; border: 1px solid #444; padding: 8px; border-radius: 6px; font-size: 14px; }
+    .new-btn { background: #16a34a; color: #fff; border: none; padding: 10px 16px; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; }
+    .new-btn:active { background: #15803d; }
+    .count { color: #aaa; font-size: 13px; margin-left: auto; }
+
+    .list { padding: 0 12px 80px; display: flex; flex-direction: column; gap: 8px; }
+    .bundle { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 12px; cursor: pointer; }
+    .bundle .title { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
+    .bundle .meta { font-size: 12px; color: #888; margin-bottom: 8px; }
+    .bundle .totals { display: flex; gap: 14px; font-size: 13px; margin-bottom: 6px; }
+    .bundle .totals .owned { color: #4ade80; }
+    .bundle .totals .need { color: #fbbf24; }
+    .bundle .totals .total { color: #eee; margin-left: auto; font-weight: 600; }
+    .progress { background: #222; height: 6px; border-radius: 3px; overflow: hidden; }
+    .progress > div { background: #4ade80; height: 100%; }
+    .empty { color: #666; text-align: center; padding: 40px 20px; font-size: 14px; }
+
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+      display: none; justify-content: center; align-items: flex-start;
+      z-index: 100; padding: 20px; overflow-y: auto;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal { background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 16px; width: 100%; max-width: 600px; }
+    .modal h2 { font-size: 16px; margin-bottom: 12px; }
+    .modal .field { margin-bottom: 10px; }
+    .modal label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
+    .modal input, .modal select, .modal textarea {
+      width: 100%; padding: 10px; background: #222; border: 1px solid #444;
+      border-radius: 6px; color: #eee; font-size: 14px; outline: none;
+      font-family: inherit;
+    }
+    .modal textarea { min-height: 140px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; resize: vertical; }
+    .row2 { display: flex; gap: 8px; }
+    .row2 > * { flex: 1; }
+    .preview-box {
+      background: #14532d22; border: 1px solid #14532d; border-radius: 6px;
+      padding: 10px; margin: 8px 0; font-size: 13px; display: none;
+    }
+    .preview-box.error { background: #4a1d1d22; border-color: #7f1d1d; color: #fca5a5; }
+    .preview-box .row { display: flex; justify-content: space-between; padding: 2px 0; }
+    .preview-box .row .v { font-weight: 600; }
+    .preview-box .row .v.owned { color: #4ade80; }
+    .preview-box .row .v.need { color: #fbbf24; }
+    .modal-actions { display: flex; gap: 8px; margin-top: 12px; }
+    .modal-actions button {
+      flex: 1; padding: 12px; border: none; border-radius: 6px;
+      font-size: 14px; font-weight: 600; cursor: pointer; color: #fff;
+    }
+    .btn-preview { background: #2563eb; }
+    .btn-save { background: #16a34a; }
+    .btn-save:disabled { background: #333; color: #666; cursor: not-allowed; }
+    .btn-cancel { background: #333; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-nav">
+      <a href="/">Snap</a>
+      <a href="/inventory">Inventory</a>
+      <a href="/batch">Batch</a>
+      <a href="/bundles" class="active">Bundles</a>
+    </div>
+    <h1>Bundles &amp; Decks</h1>
+  </div>
+
+  <div class="toolbar">
+    <button class="new-btn" id="new-deck-btn">+ New Deck</button>
+    <select id="filter-game">
+      <option value="">All games</option>
+      <option value="yugioh">Yu-Gi-Oh!</option>
+      <option value="pokemon">Pokemon</option>
+      <option value="mtg">MTG</option>
+      <option value="onepiece">One Piece</option>
+      <option value="digimon">Digimon</option>
+    </select>
+    <select id="filter-kind">
+      <option value="">All kinds</option>
+      <option value="deck">Decks</option>
+      <option value="bundle">Bundles</option>
+      <option value="lot">Lots</option>
+    </select>
+    <span class="count" id="count">Loading...</span>
+  </div>
+
+  <div class="list" id="bundle-list"></div>
+
+  <!-- New Deck modal -->
+  <div class="modal-overlay" id="new-modal">
+    <div class="modal">
+      <h2>New Deck / Bundle</h2>
+      <div class="row2">
+        <div class="field">
+          <label>Title</label>
+          <input id="m-title" type="text" placeholder="e.g. Fiendsmith Yummy">
+        </div>
+        <div class="field">
+          <label>Kind</label>
+          <select id="m-kind">
+            <option value="deck">Deck</option>
+            <option value="bundle">Bundle</option>
+            <option value="lot">Lot</option>
+          </select>
+        </div>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Game</label>
+          <select id="m-game">
+            <option value="yugioh">Yu-Gi-Oh!</option>
+            <option value="pokemon">Pokemon</option>
+            <option value="mtg">MTG</option>
+            <option value="onepiece">One Piece</option>
+            <option value="digimon">Digimon</option>
+            <option value="other">Other</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Format (optional)</label>
+          <input id="m-format" type="text" placeholder="TCG / OCG / Standard">
+        </div>
+      </div>
+      <div class="row2">
+        <div class="field">
+          <label>Source (optional)</label>
+          <input id="m-source" type="text" placeholder="e.g. Pittsboro WCQ Top 8">
+        </div>
+        <div class="field">
+          <label>Pilot (optional)</label>
+          <input id="m-pilot" type="text" placeholder="e.g. Jose Angel Fajardo">
+        </div>
+      </div>
+      <div class="field">
+        <label>Deck text (paste .ydk lines or ydke:// URI)</label>
+        <textarea id="m-deck" placeholder="ydke://...&#10;or&#10;#main&#10;12345678&#10;..."></textarea>
+      </div>
+
+      <div id="preview-box" class="preview-box"></div>
+
+      <div class="modal-actions">
+        <button class="btn-cancel" id="m-cancel">Cancel</button>
+        <button class="btn-preview" id="m-preview">Preview</button>
+        <button class="btn-save" id="m-save" disabled>Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const list = document.getElementById('bundle-list');
+    const countEl = document.getElementById('count');
+    const filterGame = document.getElementById('filter-game');
+    const filterKind = document.getElementById('filter-kind');
+
+    function escHtml(s) {
+      return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function fmtCents(c) {
+      if (!c || c <= 0) return '$0.00';
+      return '$' + (c / 100).toFixed(2);
+    }
+
+    async function loadBundles() {
+      const params = new URLSearchParams();
+      if (filterGame.value) params.set('game', filterGame.value);
+      if (filterKind.value) params.set('kind', filterKind.value);
+      const resp = await fetch('/api/bundles?' + params.toString());
+      const data = await resp.json();
+      if (data.error) {
+        list.innerHTML = '<div class="empty">Error: ' + escHtml(data.error) + '</div>';
+        countEl.textContent = '';
+        return;
+      }
+      const bundles = data.bundles || [];
+      countEl.textContent = bundles.length + ' of ' + (data.total || 0);
+      if (bundles.length === 0) {
+        list.innerHTML = '<div class="empty">No bundles yet. Tap "+ New Deck" to create one.</div>';
+        return;
+      }
+      list.innerHTML = bundles.map(renderBundle).join('');
+    }
+
+    function renderBundle(b) {
+      const pct = b.total_items > 0 ? Math.round((b.in_stock_items / b.total_items) * 100) : 0;
+      const totalCents = (b.in_stock_total_cents || 0) + (b.missing_total_cents || 0);
+      const metaParts = [];
+      metaParts.push(b.kind);
+      if (b.game) metaParts.push(b.game);
+      if (b.format) metaParts.push(b.format);
+      if (b.source) metaParts.push(b.source);
+      if (b.pilot) metaParts.push('by ' + b.pilot);
+      return (
+        '<a class="bundle" href="/bundles/' + encodeURIComponent(b.id) + '" style="display:block;text-decoration:none;color:inherit;">' +
+          '<div class="title">' + escHtml(b.title) + '</div>' +
+          '<div class="meta">' + escHtml(metaParts.join(' | ')) + '</div>' +
+          '<div class="totals">' +
+            '<span class="owned">' + b.in_stock_items + '/' + b.total_items + ' owned (' + fmtCents(b.in_stock_total_cents) + ')</span>' +
+            '<span class="need">need ' + fmtCents(b.missing_total_cents) + '</span>' +
+            '<span class="total">' + fmtCents(totalCents) + '</span>' +
+          '</div>' +
+          '<div class="progress"><div style="width:' + pct + '%"></div></div>' +
+        '</a>'
+      );
+    }
+
+    filterGame.onchange = loadBundles;
+    filterKind.onchange = loadBundles;
+
+    // ---------- New Deck modal ----------
+    const modal = document.getElementById('new-modal');
+    const previewBox = document.getElementById('preview-box');
+    const saveBtn = document.getElementById('m-save');
+
+    function openModal() {
+      ['m-title','m-format','m-source','m-pilot','m-deck'].forEach(id => document.getElementById(id).value = '');
+      document.getElementById('m-kind').value = 'deck';
+      document.getElementById('m-game').value = 'yugioh';
+      previewBox.style.display = 'none';
+      previewBox.classList.remove('error');
+      saveBtn.disabled = true;
+      modal.classList.add('active');
+    }
+    function closeModal() { modal.classList.remove('active'); }
+
+    document.getElementById('new-deck-btn').onclick = openModal;
+    document.getElementById('m-cancel').onclick = closeModal;
+
+    document.getElementById('m-preview').onclick = async () => {
+      const text = document.getElementById('m-deck').value.trim();
+      if (!text) { showPreviewError('Paste a .ydk or ydke:// first'); return; }
+
+      const btn = document.getElementById('m-preview');
+      btn.textContent = 'Looking up cards...';
+      btn.disabled = true;
+      try {
+        const resp = await fetch('/api/bundles/preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ deck_text: text }),
+        });
+        const data = await resp.json();
+        if (data.error) { showPreviewError(data.error); return; }
+        renderPreview(data);
+        saveBtn.disabled = false;
+      } catch (err) {
+        showPreviewError(err.message);
+      } finally {
+        btn.textContent = 'Preview';
+        btn.disabled = false;
+      }
+    };
+
+    function showPreviewError(msg) {
+      previewBox.classList.add('error');
+      previewBox.style.display = 'block';
+      previewBox.textContent = msg;
+      saveBtn.disabled = true;
+    }
+
+    function renderPreview(p) {
+      previewBox.classList.remove('error');
+      const s = p.summary;
+      const totalCents = s.in_stock_total_cents + s.missing_total_cents;
+      const needItems = s.total_items - s.in_stock_items;
+      let html = '';
+      html += '<div class="row"><span>Sections</span><span class="v">main ' + p.parsed.main.length + ' / extra ' + p.parsed.extra.length + ' / side ' + p.parsed.side.length + '</span></div>';
+      html += '<div class="row"><span>Unique cards</span><span class="v">' + s.unique_cards + '</span></div>';
+      html += '<div class="row"><span>In stock</span><span class="v owned">' + s.in_stock_items + ' cards / ' + fmtCents(s.in_stock_total_cents) + '</span></div>';
+      html += '<div class="row"><span>Need to source</span><span class="v need">' + needItems + ' cards / ' + fmtCents(s.missing_total_cents) + '</span></div>';
+      html += '<div class="row"><span>Total estimate</span><span class="v">' + fmtCents(totalCents) + '</span></div>';
+      if (s.unresolved_passcodes && s.unresolved_passcodes.length > 0) {
+        html += '<div class="row"><span>Unresolved passcodes</span><span class="v need">' + s.unresolved_passcodes.length + '</span></div>';
+      }
+      previewBox.innerHTML = html;
+      previewBox.style.display = 'block';
+    }
+
+    saveBtn.onclick = async () => {
+      const text = document.getElementById('m-deck').value.trim();
+      const title = document.getElementById('m-title').value.trim();
+      if (!title) { showPreviewError('Title is required to save'); return; }
+
+      saveBtn.textContent = 'Saving...';
+      saveBtn.disabled = true;
+      try {
+        const resp = await fetch('/api/bundles', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            deck_text: text,
+            title,
+            kind: document.getElementById('m-kind').value,
+            game: document.getElementById('m-game').value,
+            format: document.getElementById('m-format').value.trim() || null,
+            source: document.getElementById('m-source').value.trim() || null,
+            pilot: document.getElementById('m-pilot').value.trim() || null,
+          }),
+        });
+        const data = await resp.json();
+        if (data.error) { showPreviewError(data.error); saveBtn.disabled = false; return; }
+        closeModal();
+        loadBundles();
+      } catch (err) {
+        showPreviewError(err.message);
+        saveBtn.disabled = false;
+      } finally {
+        saveBtn.textContent = 'Save';
+      }
+    };
+
+    // Re-preview-on-edit invalidates the save button so user can't save stale preview
+    document.getElementById('m-deck').addEventListener('input', () => { saveBtn.disabled = true; });
+
+    loadBundles();
+  </script>
+</body>
+</html>`;
+}
+
+function getBundleDetailPage(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Bundle - Snap & Sell</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, system-ui, sans-serif; background: #111; color: #eee; min-height: 100dvh; }
+    .header { padding: 12px 16px; background: #1a1a1a; border-bottom: 1px solid #333; position: sticky; top: 0; z-index: 10; }
+    .header-nav { display: flex; gap: 8px; margin-bottom: 8px; }
+    .header-nav a { color: #60a5fa; text-decoration: none; font-size: 13px; padding: 6px 12px; background: #222; border-radius: 4px; }
+    .header-nav a.active { background: #2563eb; color: white; }
+    .back { color: #60a5fa; text-decoration: none; font-size: 13px; display: inline-block; margin-bottom: 8px; }
+
+    .summary { padding: 12px 16px; background: #161616; border-bottom: 1px solid #333; }
+    .summary h1 { font-size: 18px; margin-bottom: 4px; }
+    .summary .meta { font-size: 12px; color: #888; margin-bottom: 10px; }
+    .totals-row { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13px; }
+    .totals-row .pill { background: #222; padding: 6px 10px; border-radius: 6px; }
+    .totals-row .pill.owned { color: #4ade80; }
+    .totals-row .pill.need { color: #fbbf24; }
+    .totals-row .pill.total { color: #fff; font-weight: 700; background: #1e293b; }
+    .progress { background: #222; height: 6px; border-radius: 3px; overflow: hidden; margin-top: 10px; }
+    .progress > div { background: #4ade80; height: 100%; }
+
+    .actions-row { display: flex; gap: 8px; padding: 12px 16px; flex-wrap: wrap; }
+    .actions-row button {
+      padding: 8px 14px; border: none; border-radius: 6px;
+      font-size: 13px; font-weight: 600; cursor: pointer; color: #fff;
+    }
+    .btn-refresh { background: #2563eb; }
+    .btn-refresh:disabled { background: #333; color: #666; cursor: not-allowed; }
+    .btn-delete { background: #7f1d1d; margin-left: auto; }
+
+    .section { padding: 4px 12px 12px; }
+    .section h2 { font-size: 14px; color: #aaa; padding: 8px 4px; }
+    .item-list { display: flex; flex-direction: column; gap: 4px; }
+    .item {
+      display: flex; gap: 10px; align-items: center;
+      background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px;
+      padding: 8px;
+    }
+    .item.owned { border-color: #14532d; }
+    .item-thumb {
+      width: 40px; height: 58px; flex-shrink: 0;
+      background: #000; border-radius: 4px; overflow: hidden;
+      display: flex; align-items: center; justify-content: center;
+      color: #444; font-size: 9px;
+    }
+    .item-thumb img { width: 100%; height: 100%; object-fit: cover; }
+    .item-body { flex: 1; min-width: 0; }
+    .item-name { font-size: 14px; color: #eee; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .item-meta { font-size: 11px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .item-price { text-align: right; flex-shrink: 0; min-width: 92px; }
+    .item-price .unit { font-size: 13px; color: #4ade80; font-weight: 600; }
+    .item-price .line { font-size: 11px; color: #888; }
+    .item-qty {
+      flex-shrink: 0; min-width: 28px; text-align: center;
+      font-size: 13px; color: #fff; font-weight: 700;
+      background: #222; border-radius: 4px; padding: 4px 6px;
+    }
+    .stock-badge {
+      display: inline-block; font-size: 10px; padding: 2px 5px;
+      border-radius: 3px; margin-left: 4px;
+    }
+    .stock-badge.owned { background: #14532d; color: #4ade80; }
+    .stock-badge.need { background: #422006; color: #fbbf24; }
+
+    .empty { color: #666; text-align: center; padding: 40px 20px; font-size: 14px; }
+    .loading { color: #888; text-align: center; padding: 60px 20px; font-size: 14px; }
+    .error-msg {
+      background: #4a1d1d22; border: 1px solid #7f1d1d;
+      color: #fca5a5; padding: 10px; margin: 12px; border-radius: 6px;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="header-nav">
+      <a href="/">Snap</a>
+      <a href="/inventory">Inventory</a>
+      <a href="/batch">Batch</a>
+      <a href="/bundles" class="active">Bundles</a>
+    </div>
+    <a href="/bundles" class="back">&larr; All bundles</a>
+  </div>
+
+  <div id="loading" class="loading">Loading...</div>
+  <div id="content" style="display:none">
+    <div class="summary" id="summary"></div>
+    <div class="actions-row">
+      <button class="btn-refresh" id="refresh-btn">Refresh prices</button>
+      <button class="btn-delete" id="delete-btn">Delete</button>
+    </div>
+    <div id="sections"></div>
+  </div>
+
+  <script>
+    const bundleId = location.pathname.split('/').pop();
+    const loadingEl = document.getElementById('loading');
+    const contentEl = document.getElementById('content');
+    const summaryEl = document.getElementById('summary');
+    const sectionsEl = document.getElementById('sections');
+
+    function escHtml(s) {
+      return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+    function fmtCents(c) {
+      if (!c || c <= 0) return '$0.00';
+      return '$' + (c / 100).toFixed(2);
+    }
+    function fmtDate(s) {
+      if (!s) return '';
+      try { return new Date(s).toLocaleString(); } catch { return s; }
+    }
+
+    async function load() {
+      loadingEl.style.display = '';
+      contentEl.style.display = 'none';
+      try {
+        const resp = await fetch('/api/bundles/' + encodeURIComponent(bundleId));
+        const data = await resp.json();
+        if (data.error) { showError(data.error); return; }
+        render(data);
+      } catch (err) {
+        showError(err.message);
+      }
+    }
+
+    function showError(msg) {
+      loadingEl.innerHTML = '<div class="error-msg">' + escHtml(msg) + '</div>';
+    }
+
+    function render(data) {
+      const b = data.bundle;
+      const items = data.items || [];
+
+      const totalCents = (b.in_stock_total_cents || 0) + (b.missing_total_cents || 0);
+      const pct = b.total_items > 0 ? Math.round((b.in_stock_items / b.total_items) * 100) : 0;
+      const metaParts = [];
+      if (b.kind) metaParts.push(b.kind);
+      if (b.game) metaParts.push(b.game);
+      if (b.format) metaParts.push(b.format);
+      if (b.source) metaParts.push(b.source);
+      if (b.pilot) metaParts.push('by ' + b.pilot);
+
+      summaryEl.innerHTML =
+        '<h1>' + escHtml(b.title) + '</h1>' +
+        '<div class="meta">' + escHtml(metaParts.join(' | ')) + '</div>' +
+        '<div class="totals-row">' +
+          '<span class="pill owned">' + b.in_stock_items + '/' + b.total_items + ' owned (' + fmtCents(b.in_stock_total_cents) + ')</span>' +
+          '<span class="pill need">need ' + fmtCents(b.missing_total_cents) + '</span>' +
+          '<span class="pill total">' + fmtCents(totalCents) + '</span>' +
+        '</div>' +
+        '<div class="progress"><div style="width:' + pct + '%"></div></div>';
+
+      const bySection = { main: [], extra: [], side: [] };
+      for (const it of items) {
+        const sec = (it.section === 'extra' || it.section === 'side') ? it.section : 'main';
+        bySection[sec].push(it);
+      }
+
+      let html = '';
+      for (const sec of ['main', 'extra', 'side']) {
+        const list = bySection[sec];
+        if (list.length === 0) continue;
+        const sectionQty = list.reduce((n, it) => n + (it.quantity || 0), 0);
+        html += '<div class="section">' +
+          '<h2>' + sec.toUpperCase() + ' &mdash; ' + sectionQty + ' cards (' + list.length + ' unique)</h2>' +
+          '<div class="item-list">' +
+          list.map(renderItem).join('') +
+          '</div></div>';
+      }
+      sectionsEl.innerHTML = html;
+
+      loadingEl.style.display = 'none';
+      contentEl.style.display = '';
+    }
+
+    function renderItem(it) {
+      const isOwned = !!it.product_id;
+      const stockBadge = isOwned
+        ? '<span class="stock-badge owned">OWNED</span>'
+        : '<span class="stock-badge need">NEED</span>';
+      const setLine = [];
+      if (it.set_number) setLine.push(it.set_number);
+      else if (it.set_name) setLine.push(it.set_name);
+      if (it.price_source) setLine.push(it.price_source);
+      if (it.konami_id) setLine.push('#' + it.konami_id);
+
+      const lineCents = (it.unit_price_cents || 0) * (it.quantity || 0);
+      const thumb = it.image_url
+        ? '<img src="' + escHtml(it.image_url) + '" alt="" loading="lazy">'
+        : '<span>no img</span>';
+
+      return (
+        '<div class="item ' + (isOwned ? 'owned' : '') + '">' +
+          '<div class="item-qty">x' + (it.quantity || 1) + '</div>' +
+          '<div class="item-thumb">' + thumb + '</div>' +
+          '<div class="item-body">' +
+            '<div class="item-name">' + escHtml(it.card_name) + stockBadge + '</div>' +
+            '<div class="item-meta">' + escHtml(setLine.join(' | ')) + '</div>' +
+          '</div>' +
+          '<div class="item-price">' +
+            '<div class="unit">' + fmtCents(it.unit_price_cents) + '</div>' +
+            '<div class="line">' + fmtCents(lineCents) + ' total</div>' +
+          '</div>' +
+        '</div>'
+      );
+    }
+
+    document.getElementById('refresh-btn').onclick = async () => {
+      const btn = document.getElementById('refresh-btn');
+      btn.textContent = 'Refreshing (looks up every card)...';
+      btn.disabled = true;
+      try {
+        const resp = await fetch('/api/bundles/' + encodeURIComponent(bundleId) + '/refresh-prices', { method: 'POST' });
+        const data = await resp.json();
+        if (data.error) { alert('Refresh failed: ' + data.error); return; }
+        await load();
+      } catch (err) {
+        alert('Refresh failed: ' + err.message);
+      } finally {
+        btn.textContent = 'Refresh prices';
+        btn.disabled = false;
+      }
+    };
+
+    document.getElementById('delete-btn').onclick = async () => {
+      if (!confirm('Delete this bundle? This cannot be undone.')) return;
+      try {
+        const resp = await fetch('/api/bundles/' + encodeURIComponent(bundleId), { method: 'DELETE' });
+        const data = await resp.json();
+        if (data.error) { alert('Delete failed: ' + data.error); return; }
+        location.href = '/bundles';
+      } catch (err) {
+        alert('Delete failed: ' + err.message);
+      }
+    };
+
+    load();
+  </script>
+</body>
+</html>`;
 }
 
 // ---------------------------------------------------------------------------

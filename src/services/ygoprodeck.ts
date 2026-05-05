@@ -122,3 +122,24 @@ export function pickUsPriceCents(card: YgoCard): number | null {
     priceStringToCents(p.amazon_price)
   );
 }
+
+export interface ChosenPrinting {
+  set: YgoCardSet;
+  unit_price_cents: number;
+}
+
+// Pick the cheapest printing of this card that has a usable price. Mirrors
+// YGOPRODeck's deck-pricer behavior — gives a realistic "shop around" total
+// rather than overcharging for the most expensive variant.
+export function pickCheapestPrinting(card: YgoCard): ChosenPrinting | null {
+  if (!card.card_sets || card.card_sets.length === 0) return null;
+  let best: ChosenPrinting | null = null;
+  for (const set of card.card_sets) {
+    const cents = priceStringToCents(set.set_price);
+    if (cents === null) continue;
+    if (best === null || cents < best.unit_price_cents) {
+      best = { set, unit_price_cents: cents };
+    }
+  }
+  return best;
+}

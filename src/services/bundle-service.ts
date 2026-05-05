@@ -6,8 +6,7 @@
 import { supabase } from "../lib/supabase";
 import { parseDeck, groupYdk, uniquePasscodes } from "./ydk-parser";
 import type { YdkParsed, YdkSection } from "./ydk-parser";
-import { lookupCardsByPasscode, pickUsPriceCents } from "./ygoprodeck";
-import type { YgoCard } from "./ygoprodeck";
+import { lookupCardsByPasscode, pickCheapestPrinting, pickUsPriceCents } from "./ygoprodeck";
 import type {
   BundleGame,
   BundleInsert,
@@ -77,7 +76,10 @@ export async function previewBundleFromYdk(ydkText: string): Promise<BundlePrevi
     for (const { passcode, quantity } of grouped[section]) {
       const card = lookup.cards.get(passcode);
       const cardName = card?.name ?? `Unknown card #${passcode}`;
-      const setRef = card?.card_sets?.[0];
+      // Cheapest printing (per YGOPRODeck's deck-pricer convention). Falls back
+      // to the first printing if none have a usable set_price.
+      const printing = card ? pickCheapestPrinting(card) : null;
+      const setRef = printing?.set ?? card?.card_sets?.[0];
       const imageUrl = card?.card_images?.[0]?.image_url ?? null;
 
       const matched = card ? await matchInventory(passcode, card.name) : null;
@@ -89,7 +91,10 @@ export async function previewBundleFromYdk(ydkText: string): Promise<BundlePrevi
         price_source = unit_price_cents !== null ? "self" : null;
       }
       if (unit_price_cents === null && card) {
-        unit_price_cents = pickUsPriceCents(card);
+        // Aggregated TCGplayer market price tracks the cheapest live listing
+        // across printings — closer to real buy-low than any single printing's
+        // cached set_price. Cheapest printing's set_price is the fallback.
+        unit_price_cents = pickUsPriceCents(card) ?? printing?.unit_price_cents ?? null;
         if (unit_price_cents !== null) price_source = "ygoprodeck";
       }
 
@@ -193,6 +198,119 @@ export async function createBundleFromYdk(
   }
 
   return { bundle_id: bundleId, preview };
+}
+
+// ---------------------------------------------------------------------------
+// Recompute: re-run YGOPRODeck lookup + inventory match + price pick on an
+// existing bundle. Updates each bundle_item in place and rewrites the
+// denormalized aggregates on the bundles row. Returns updated summary.
+// ---------------------------------------------------------------------------
+
+export interface RecomputeResult {
+  bundle_id: string;
+  summary: PreviewSummary;
+}
+
+interface ExistingItemRow {
+  id: string;
+  konami_id: string | null;
+  card_name: string;
+  quantity: number;
+  section: string | null;
+  position: number | null;
+}
+
+export async function recomputeBundle(bundleId: string): Promise<RecomputeResult> {
+  const { data: existing, error: itemsErr } = await supabase
+    .from("bundle_items")
+    .select("id, konami_id, card_name, quantity, section, position")
+    .eq("bundle_id", bundleId)
+    .order("position", { ascending: true });
+
+  if (itemsErr) {
+    throw new Error(`Failed to read bundle_items: ${itemsErr.message}`);
+  }
+
+  const items = (existing ?? []) as ExistingItemRow[];
+  const passcodes = [...new Set(items.map((it) => it.konami_id).filter((p): p is string => !!p))];
+  const lookup = passcodes.length > 0
+    ? await lookupCardsByPasscode(passcodes)
+    : { cards: new Map(), missingPasscodes: [] as string[] };
+
+  let totalItems = 0;
+  let inStockItems = 0;
+  let inStockTotal = 0;
+  let missingTotal = 0;
+  const now = new Date().toISOString();
+
+  for (const it of items) {
+    const card = it.konami_id ? lookup.cards.get(it.konami_id) : undefined;
+    const printing = card ? pickCheapestPrinting(card) : null;
+    const setRef = printing?.set ?? card?.card_sets?.[0];
+    const matched = card ? await matchInventory(it.konami_id ?? "", card.name) : null;
+
+    let unit_price_cents: number | null = null;
+    let price_source: BundleItemPriceSource | null = null;
+    if (matched) {
+      unit_price_cents = matched.current_price ?? matched.market_price ?? null;
+      price_source = unit_price_cents !== null ? "self" : null;
+    }
+    if (unit_price_cents === null && card) {
+      unit_price_cents = pickUsPriceCents(card) ?? printing?.unit_price_cents ?? null;
+      if (unit_price_cents !== null) price_source = "ygoprodeck";
+    }
+
+    totalItems += it.quantity;
+    const inStock = !!matched && (matched.quantity ?? 0) > 0;
+    if (inStock) inStockItems += it.quantity;
+    const lineTotal = (unit_price_cents ?? 0) * it.quantity;
+    if (matched?.id) inStockTotal += lineTotal;
+    else missingTotal += lineTotal;
+
+    const update: Partial<BundleItemInsert> = {
+      product_id: matched?.id ?? null,
+      card_name: card?.name ?? it.card_name,
+      set_name: setRef?.set_name ?? null,
+      set_number: setRef?.set_code ?? null,
+      image_url: card?.card_images?.[0]?.image_url ?? null,
+      unit_price_cents,
+      price_source,
+      price_updated_at: unit_price_cents !== null ? now : null,
+    };
+
+    const { error: updErr } = await supabase
+      .from("bundle_items")
+      .update(update)
+      .eq("id", it.id);
+    if (updErr) {
+      throw new Error(`Failed to update bundle_item ${it.id}: ${updErr.message}`);
+    }
+  }
+
+  const summary: PreviewSummary = {
+    total_items: totalItems,
+    unique_cards: items.length,
+    in_stock_items: inStockItems,
+    in_stock_total_cents: inStockTotal,
+    missing_total_cents: missingTotal,
+    unresolved_passcodes: lookup.missingPasscodes,
+    unknown_directives: [],
+  };
+
+  const { error: bundleErr } = await supabase
+    .from("bundles")
+    .update({
+      total_items: totalItems,
+      in_stock_items: inStockItems,
+      in_stock_total_cents: inStockTotal,
+      missing_total_cents: missingTotal,
+    })
+    .eq("id", bundleId);
+  if (bundleErr) {
+    throw new Error(`Failed to update bundle aggregates: ${bundleErr.message}`);
+  }
+
+  return { bundle_id: bundleId, summary };
 }
 
 // ---------------------------------------------------------------------------

@@ -83,10 +83,11 @@ function printItems(items: PreviewItem[]): void {
     for (const it of sub) {
       const stockMark = it.product_id ? "[OWNED]" : "[NEED] ";
       const priceTag = it.price_source ? `(${it.price_source})` : "";
+      const setTag = it.set_number ? `[${it.set_number}]` : "";
       console.log(
         `  ${stockMark} ${it.passcode.padStart(8)} x${it.quantity} ` +
-          `${pad(it.card_name, 38)} ${fmt(it.unit_price_cents).padStart(8)}/ea ` +
-          `${fmt(it.line_total_cents).padStart(8)} ${priceTag}`
+          `${pad(it.card_name, 36)} ${fmt(it.unit_price_cents).padStart(8)}/ea ` +
+          `${fmt(it.line_total_cents).padStart(8)} ${pad(setTag, 14)} ${priceTag}`
       );
     }
     console.log("");

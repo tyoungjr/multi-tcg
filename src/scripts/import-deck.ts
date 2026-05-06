@@ -6,9 +6,10 @@
 //   npm run deck:import -- path/to/deck.ydk
 //   npm run deck:import -- path/to/deck.ydk --title "Fiendsmith Yummy" --save
 //   npm run deck:import -- path/to/deck.ydk --title "..." --pilot "Jose Angel Fajardo" \
-//                          --source "Pittsboro WCQ Top 8" --format TCG --save
+//                          --source "Pittsboro WCQ Top 8" --format TCG --meta --save
 //
 // Default is DRY-RUN. Pass --save to actually insert a bundle + bundle_items.
+// Pass --meta to flag the bundle as meta (drives ad targeting / sourcing priority).
 
 import { readFileSync, existsSync } from "fs";
 import { resolve, basename } from "path";
@@ -29,6 +30,7 @@ interface CliArgs {
   source_url: string | null;
   pilot: string | null;
   description: string | null;
+  meta: boolean;
   save: boolean;
   verbose: boolean;
 }
@@ -43,6 +45,7 @@ function parseArgs(argv: string[]): CliArgs {
     source_url: null,
     pilot: null,
     description: null,
+    meta: false,
     save: false,
     verbose: false,
   };
@@ -51,6 +54,7 @@ function parseArgs(argv: string[]): CliArgs {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--save") args.save = true;
+    else if (a === "--meta") args.meta = true;
     else if (a === "--verbose") args.verbose = true;
     else if (a === "--title") args.title = argv[++i] ?? null;
     else if (a === "--game") args.game = argv[++i] ?? "yugioh";
@@ -82,10 +86,11 @@ function printItems(items: PreviewItem[]): void {
     console.log(`${section.toUpperCase()} (${totalQty} cards, ${sub.length} unique):`);
     for (const it of sub) {
       const stockMark = it.product_id ? "[OWNED]" : "[NEED] ";
+      const stapleMark = it.is_staple ? "*" : " ";
       const priceTag = it.price_source ? `(${it.price_source})` : "";
       const setTag = it.set_number ? `[${it.set_number}]` : "";
       console.log(
-        `  ${stockMark} ${it.passcode.padStart(8)} x${it.quantity} ` +
+        `  ${stockMark}${stapleMark} ${it.passcode.padStart(8)} x${it.quantity} ` +
           `${pad(it.card_name, 36)} ${fmt(it.unit_price_cents).padStart(8)}/ea ` +
           `${fmt(it.line_total_cents).padStart(8)} ${pad(setTag, 14)} ${priceTag}`
       );
@@ -120,13 +125,14 @@ async function main(): Promise<void> {
       source_url: args.source_url,
       pilot: args.pilot,
       description: args.description,
+      is_meta: args.meta,
     });
     printPreview(result.preview, args.verbose);
-    console.log(`Saved bundle ${result.bundle_id}`);
+    console.log(`Saved bundle ${result.bundle_id}${args.meta ? " [META]" : ""}`);
     return;
   }
 
-  const preview = await previewBundleFromYdk(ydk);
+  const preview = await previewBundleFromYdk(ydk, { format: args.format });
   printPreview(preview, args.verbose);
 }
 
@@ -137,9 +143,21 @@ function printPreview(
   const s = preview.summary;
   console.log(`Sections: main=${preview.parsed.main.length} extra=${preview.parsed.extra.length} side=${preview.parsed.side.length} (total ${s.total_items})`);
   console.log(`Unique cards: ${s.unique_cards}`);
+  console.log(`Staples:      ${s.staple_count} unique (* in listing)`);
+  if (s.archetypes.length > 0) {
+    console.log(`Archetypes:   ${s.archetypes.join(", ")}`);
+  }
   console.log(`In stock:     ${s.in_stock_items} cards / ${fmt(s.in_stock_total_cents)}`);
   console.log(`Need to source: ${s.total_items - s.in_stock_items} cards / ${fmt(s.missing_total_cents)} (est.)`);
   console.log(`Total estimate: ${fmt(s.in_stock_total_cents + s.missing_total_cents)}`);
+
+  if (s.banlist_warnings.length > 0) {
+    console.log("");
+    console.log(`Banlist warnings: ${s.banlist_warnings.length}`);
+    for (const w of s.banlist_warnings) {
+      console.log(`  [${w.status.toUpperCase()}] x${w.quantity} ${w.passcode.padStart(8)} ${w.card_name}`);
+    }
+  }
 
   if (s.unresolved_passcodes.length > 0) {
     console.log("");

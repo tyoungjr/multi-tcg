@@ -153,6 +153,8 @@ export type BundleItemPriceSource =
   | "ygoprodeck"
   | "manual";
 
+export type BundleBanlistStatus = "Banned" | "Limited" | "Semi-Limited";
+
 export interface Bundle {
   id: string;
   title: string;
@@ -163,6 +165,9 @@ export interface Bundle {
   source: string | null;
   source_url: string | null;
   pilot: string | null;
+  is_meta: boolean;
+  staple_count: number;
+  archetypes: string[];
   total_items: number;
   in_stock_items: number;
   in_stock_total_cents: number;
@@ -185,6 +190,9 @@ export interface BundleInsert {
   source?: string | null;
   source_url?: string | null;
   pilot?: string | null;
+  is_meta?: boolean;
+  staple_count?: number;
+  archetypes?: string[];
   total_items?: number;
   in_stock_items?: number;
   in_stock_total_cents?: number;
@@ -208,6 +216,10 @@ export interface BundleItem {
   unit_price_cents: number | null;
   price_source: BundleItemPriceSource | string | null;
   price_updated_at: string | null;
+  is_staple: boolean;
+  archetype: string | null;
+  card_type: string | null;
+  banlist_status: BundleBanlistStatus | string | null;
   metadata: Record<string, unknown>;
   created_at: string;
 }
@@ -227,5 +239,9 @@ export interface BundleItemInsert {
   unit_price_cents?: number | null;
   price_source?: BundleItemPriceSource | string | null;
   price_updated_at?: string | null;
+  is_staple?: boolean;
+  archetype?: string | null;
+  card_type?: string | null;
+  banlist_status?: BundleBanlistStatus | string | null;
   metadata?: Record<string, unknown>;
 }

@@ -182,6 +182,7 @@ interface SaveRequest {
   graded_score?: number | null;
   set_name?: string | null;
   set_number?: string | null;
+  location?: string | null;
   list_on_shopify: boolean;
 }
 
@@ -205,6 +206,7 @@ async function saveAndList(req: SaveRequest): Promise<{
     graded_score: req.graded_score ?? null,
     set_name: req.set_name ?? null,
     set_number: req.set_number ?? null,
+    location: req.location ?? null,
   };
 
   if (req.pricecharting_id) {
@@ -533,6 +535,10 @@ function getCameraPage(): string {
           <input id="f-set-name" type="text" placeholder="Set name (e.g. Base Set)" style="flex:2;padding:10px;font-size:16px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
           <input id="f-set-number" type="text" placeholder="#" style="flex:1;padding:10px;font-size:16px;background:#222;border:1px solid #444;border-radius:6px;color:#eee;">
         </div>
+      </div>
+      <div class="form-group">
+        <label>Location</label>
+        <input id="f-location" type="text" placeholder="e.g. Tin A slot 3, Binder 2 p7">
       </div>
       <div class="form-group">
         <label>Quantity</label>
@@ -881,6 +887,7 @@ function getCameraPage(): string {
           graded_score: condition === 'graded' && gradeStr ? parseFloat(gradeStr) : null,
           set_name: document.getElementById('f-set-name').value.trim() || null,
           set_number: document.getElementById('f-set-number').value.trim() || null,
+          location: document.getElementById('f-location').value.trim() || null,
           list_on_shopify: listOnShopify,
         };
 

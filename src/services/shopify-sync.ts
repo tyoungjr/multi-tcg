@@ -301,7 +301,7 @@ export async function syncOrders(
       // Find our product by shopify_product_id
       const { data: products } = await supabase
         .from("products")
-        .select("id, title, inventory_status")
+        .select("id, title, inventory_status, location")
         .eq("shopify_product_id", String(item.product_id))
         .limit(1);
 
@@ -327,7 +327,8 @@ export async function syncOrders(
         errors++;
       } else {
         const price = `$${item.price}`;
-        console.log(`  SOLD ${product.title} - ${price} (Order ${order.name})`);
+        const locationTag = product.location ? ` [@ ${product.location}]` : " [@ unknown — set a location]";
+        console.log(`  SOLD ${product.title} - ${price} (Order ${order.name})${locationTag}`);
 
         // Record the sale in price_history
         await supabase.from("price_history").insert({

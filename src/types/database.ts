@@ -61,6 +61,7 @@ export interface Product {
   shopify_synced_at: string | null;
   set_name: string | null;
   set_number: string | null;
+  location: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -89,6 +90,7 @@ export interface ProductInsert {
   quantity?: number;
   set_name?: string | null;
   set_number?: string | null;
+  location?: string | null;
 }
 
 export interface PriceHistory {

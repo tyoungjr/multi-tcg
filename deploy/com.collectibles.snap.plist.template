@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent that runs `npm run snap` 24/7 on a Mac mini.
+  Don't load this file directly — placeholders need to be filled in.
+  Run `deploy/install-launchd.sh` from the project root; it resolves your
+  current node/npm paths, substitutes them, writes the result to
+  ~/Library/LaunchAgents/com.collectibles.snap.plist, and loads it.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.collectibles.snap</string>
+
+  <key>WorkingDirectory</key>
+  <string>@@WORKING_DIR@@</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>@@NPM@@</string>
+    <string>run</string>
+    <string>snap</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- launchd starts with a minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin).
+         node modules that shell out (e.g. sharp's native compile fallback)
+         expect /opt/homebrew/bin on Apple Silicon. -->
+    <key>PATH</key>
+    <string>@@NODE_DIR@@:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- Crash-loop protection: if snap exits within 10s of starting, wait this
+       many seconds before restarting. Prevents fork-bombing on bad config. -->
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+
+  <key>StandardOutPath</key>
+  <string>@@WORKING_DIR@@/snap.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>@@WORKING_DIR@@/snap.err.log</string>
+</dict>
+</plist>

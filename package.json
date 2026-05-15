@@ -3,10 +3,14 @@
   "version": "1.0.0",
   "description": "Unified collectibles inventory management system",
   "main": "dist/index.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "test": "tsx src/index.ts",
+    "setup": "bash scripts/setup.sh",
     "pc:search": "tsx src/scripts/search-pricecharting.ts",
     "pc:update": "tsx src/scripts/update-prices.ts",
     "collection": "tsx src/scripts/collection.ts",

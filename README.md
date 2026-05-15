@@ -4,12 +4,13 @@ A unified inventory + listing pipeline for collectibles (trading cards, games, c
 
 ## What it does
 
-- **Snap & Sell (PWA)** — Phone-based camera UI. Take a photo, get an AI identification + PriceCharting match + suggested price, review, and push to Shopify.
+- **Snap & Sell (PWA)** — Phone-based camera UI. Take a photo, get an AI identification + PriceCharting match + suggested price, review, and push to Shopify. Each item gets a freeform `location` field so you can find it again when it sells.
 - **Batch mode** — Snap many items in rapid succession. Identifications run in the background. Review and bulk-save/list when ready.
-- **Inventory browser** — Scroll your DB, attach/replace photos on existing items, edit price/condition/grading/notes, delete.
+- **Inventory browser** — Scroll your DB, attach/replace photos on existing items, edit price/condition/grading/notes/location, delete.
 - **CSV import** — Seed the DB from a PriceCharting CSV export.
 - **Shopify sync** — Push products to Shopify with images. Pulls orders (marks sold), archives stale listings (for deleted DB items), and only pushes rows that actually changed since last sync.
 - **Pricing pipeline** — PriceCharting first, falls back to eBay sold listings and Google Lens only when PC misses.
+- **Yu-Gi-Oh decks & bundles** — Parse a `.ydk` (YGOPRO / MasterDuel export), resolve each card via YGOPRODeck, match against inventory, and save as a sellable bundle. Supports partial fulfillment (list a deck even when not every card is in stock), meta tagging, staple flagging, archetype aggregation, and TCG banlist warnings.
 
 ## Architecture
 
@@ -32,9 +33,23 @@ Supabase is the single source of truth. PriceCharting is the primary pricing ora
 
 ## Setup
 
+### Quickstart
+
+On a fresh clone (macOS or Linux):
+
+```bash
+git clone <repo>
+cd shopify-integration
+npm run setup     # checks Node, installs deps, scaffolds .env, installs Supabase CLI
+```
+
+Then follow the printed remaining steps (fill `.env`, `supabase link`, `npm run shopify:auth`). Details below.
+
 ### 1. Prerequisites
 
-- Node.js 20+ with npm
+- **Node.js 20+** (an `.nvmrc` is shipped — `nvm use` picks it up)
+- **macOS only:** Xcode Command Line Tools (`xcode-select --install`) — only needed if `sharp` falls back to a native build; the setup script checks for you
+- **Supabase CLI** (`brew install supabase/tap/supabase` on macOS, or see the [docs](https://supabase.com/docs/guides/local-development/cli/getting-started))
 - A Supabase project (free tier paused after a week of inactivity — upgrade to Basic if you want always-on)
 - API keys for the services you want to use (see `.env.example`)
 
@@ -50,13 +65,15 @@ cp .env.example .env
 
 ### 3. Database
 
-Apply the migrations to your Supabase project:
+A fresh clone needs to link its local checkout to your remote Supabase project before pushing migrations:
 
 ```bash
-npx supabase db push
+supabase login                                  # opens browser, one-time
+supabase link --project-ref <your-project-ref>  # find it in your Supabase dashboard URL
+supabase db push                                # apply migrations
 ```
 
-Migrations are in `supabase/migrations/`. They create the `products`, `product_images`, `price_history` tables, enums, indexes, RLS policies, fuzzy-search, and the `shopify_synced_at` column.
+Migrations in `supabase/migrations/` create the `products`, `product_images`, `price_history`, `bundles`, and `bundle_items` tables, plus enums, fuzzy-search RPC, set fields, the `location` column on products, and the bundle meta/staple/banlist columns.
 
 Also create a Supabase Storage bucket named **`product-images`** and set it to **public** (Shopify needs to be able to fetch the image URLs).
 
@@ -115,13 +132,27 @@ A product counts as "changed" when `products.updated_at > products.shopify_synce
 ### Other commands
 
 ```bash
-npm run shopify:orders            # just pull orders (no push)
+npm run shopify:orders            # just pull orders (no push) — prints @location next to each SOLD line
 npm run pc:search -- <query>      # PriceCharting search CLI
 npm run csv:import -- <file.csv>  # bulk-import a PriceCharting CSV export
 npm run collection:import         # pull your PriceCharting collection via API
 npm run identify -- <image.jpg>   # single-file identify CLI
 npm run identify:watch            # watch a folder (OneDrive inbox) for new photos
 ```
+
+### Yu-Gi-Oh decks / bundles
+
+```bash
+npm run deck:inspect -- path/to/deck.ydk             # parse + print without API calls
+npm run deck:import                                  # dry-run on the bundled fixture
+npm run deck:import -- path/to/deck.ydk              # dry-run a real deck
+npm run deck:import -- path/to/deck.ydk --save       # persist as a bundle
+npm run deck:import -- path/to/deck.ydk \
+  --title "Fiendsmith Yummy" --pilot "Jose Angel Fajardo" \
+  --source "Pittsboro WCQ Top 8" --format TCG --meta --save
+```
+
+The preview shows: section-by-section card listing with [OWNED] vs [NEED] flags, staple markers (`*`), archetypes, banlist warnings for the chosen format, and a buy-low total based on YGOPRODeck's cheapest-printing data. `--meta` flags the bundle for ad-targeting / sourcing priority. See `src/services/__fixtures__/sample.ydk` for the expected file format.
 
 ## Data model
 
@@ -141,11 +172,17 @@ Core table. Fields worth knowing:
 | `metadata` | JSONB — category-specific fields (see below) |
 | `quantity` | Defaults to 1 |
 | `graded_score` / `grading_company` | For graded items (PSA 10, BGS 9.5, etc.) |
+| `set_name` / `set_number` | Set name + collector number (TCG / video game variant) |
+| `location` | Freeform physical location ("Tin A slot 3", "Binder 2 p7"). Trigram-indexed for fast ILIKE search. Surfaced on the orders sync log so you know where to dig. |
 | `purchase_notes` | Free-text notes |
 
 ### `personal_collection`
 
 Items you own but aren't selling. They stay in the DB (for valuation, dupe-checking, insurance) but `shopify:push` ignores them.
+
+### Bundles & bundle_items
+
+Multi-card listings (decks, lots, sealed bundles). The killer property is **partial fulfillment** — `bundle_items.product_id` is nullable, so a deck can be listed even when not every card is in stock; the missing ones source on demand. Bundles aggregate `staple_count`, `archetypes[]`, and `is_meta` for ad targeting and sourcing priority. Per-item: `is_staple`, `archetype`, `card_type`, `banlist_status` from YGOPRODeck. See [src/services/bundle-service.ts](src/services/bundle-service.ts) for the matching + pricing pipeline.
 
 ### Metadata (per-category JSONB)
 
@@ -197,65 +234,19 @@ supabase/
 
 ## Running on a Mac mini (headless)
 
-Plan for when you want this to run 24/7:
-
-### 1. Clone + set up on the mini
+There's a launchd agent template and installer in [deploy/](deploy/). After running setup on the mini:
 
 ```bash
-git clone <repo>
-cd shopify-integration
-npm install
-cp .env.example .env   # fill in, copy tokens from your dev box
+./deploy/install-launchd.sh
 ```
 
-### 2. Run as a launchd service
+The installer resolves your actual `node`/`npm` paths (so it works with Homebrew, nvm, or asdf), substitutes them into the plist, drops it in `~/Library/LaunchAgents/`, and loads it. The agent runs at boot, restarts on crash, and writes logs to `snap.log` / `snap.err.log` in the repo.
 
-Create `~/Library/LaunchAgents/com.collectibles.snap.plist`:
+See [deploy/README.md](deploy/README.md) for operation commands, the firewall pre-approval note, and remote-access options (Tailscale recommended).
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-  <dict>
-    <key>Label</key>
-    <string>com.collectibles.snap</string>
-    <key>WorkingDirectory</key>
-    <string>/Users/YOU/shopify-integration</string>
-    <key>ProgramArguments</key>
-    <array>
-      <string>/usr/local/bin/npm</string>
-      <string>run</string>
-      <string>snap</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/Users/YOU/shopify-integration/snap.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/YOU/shopify-integration/snap.err.log</string>
-  </dict>
-</plist>
-```
+### Scheduling shopify:push
 
-Load it:
-
-```bash
-launchctl load ~/Library/LaunchAgents/com.collectibles.snap.plist
-```
-
-### 3. Reserve the Mac mini's LAN IP (router DHCP reservation) so the phone URL is stable.
-
-### 4. For remote access:
-
-- Tailscale (easiest) — add the mini + your phone to a tailnet, access `http://<mini-tailscale-ip>:3457` from anywhere
-- Cloudflare Tunnel — if you want a public URL without opening ports
-- Port forward 3457 — works but exposes the server
-
-### 5. Schedule shopify:push
-
-Add a cron-style launchd agent that runs `npm run shopify:push` once or twice a day, so orders get synced and new items flow to Shopify automatically.
+To auto-pull orders + push new items once or twice a day, add a second launchd agent with `StartCalendarInterval` set. That isn't shipped — copy the snap plist as a starting point and swap `ProgramArguments` to `npm run shopify:push`. Drop the `KeepAlive` flag (cron-style runs should exit cleanly).
 
 ## Troubleshooting
 
